@@ -19,6 +19,7 @@ public sealed partial class FoldReflection : IMethodPass
             if (call.IsTailCall || call.IsReadOnly || call.Constraint != null) continue;
 
             var creation = DelegateCreation.Match(call, ctx.Module.Resolver);
+            if (creation == null && !IsMemberAccess(call)) continue;
             Value? source = creation?.MethodInfo ?? (call.IsStatic ? null : call.Args[0]);
             ReflectionLookup.Result? resolved = null;
             if (source is CallInst lookup && !lookups.TryGetValue(lookup, out resolved)) {
@@ -61,6 +62,16 @@ public sealed partial class FoldReflection : IMethodPass
         return ctx.Method.Revision == revision ? MethodInvalidations.None :
             ctx.Method.ControlFlowRevision == controlFlowRevision ? MethodInvalidations.DataFlow : MethodInvalidations.ExceptionRegions;
     }
+
+    private static bool IsMemberAccess(CallInst call)
+        => !call.IsStatic && (call.Method.Name switch {
+            "GetValue" or "SetValue" => call.Method.DeclaringType.IsCorelibType(typeof(FieldInfo)) ||
+                call.Method.DeclaringType.IsCorelibType(typeof(PropertyInfo)),
+            "Invoke" => call.Method.DeclaringType.IsCorelibType(typeof(MethodBase)),
+            "get_MethodHandle" => IsMethodHandleCall(call),
+            "GetFunctionPointer" => IsFunctionPointerCall(call),
+            _ => false
+        });
 
     private static bool FoldField(CallInst call, FieldDesc field, InliningAccess access)
     {
