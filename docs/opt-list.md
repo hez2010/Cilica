@@ -98,7 +98,7 @@ Direct `source.Sum()` calls without a preceding stage retain the runtime's speci
 
 ### Benchmarks
 
-[Source](/tests/Benchmarks/LinqExpansion.cs). These workloads include mutable-list queries, a string predicate count, and a LINQ ray tracer. Their results measure the complete default pipeline together with the runtime JIT, rather than one isolated pass.
+[Source](../tests/Benchmarks/LinqExpansion.cs). These workloads include mutable-list queries, a string predicate count, and a LINQ ray tracer. Their results measure the complete default pipeline together with the runtime JIT, rather than one isolated pass.
 
 | Method         | Toolchain          | ElemCount |       Mean |      Error |     StdDev | Ratio | RatioSD |
 | -------------- | ------------------ | --------- | ---------: | ---------: | ---------: | ----: | ------: |
@@ -367,7 +367,7 @@ An empty source does not access the destination. A short destination receives th
 
 ### Benchmarks
 
-[Source](/tests/Benchmarks/AutoVectorization.cs). `CountLetters` uses vector character comparisons and population counts; `GenerateFloats` vectorizes its pointwise arithmetic. `GenerateInts` retains scalar integer `Abs` to preserve overflow exceptions. `NormalizeFloats` retains its scalar floating-point min/max reduction and vectorizes its pointwise normalization loop.
+[Source](../tests/Benchmarks/AutoVectorization.cs). `CountLetters` uses vector character comparisons and population counts; `GenerateFloats` vectorizes its pointwise arithmetic. `GenerateInts` retains scalar integer `Abs` to preserve overflow exceptions. `NormalizeFloats` retains its scalar floating-point min/max reduction and vectorizes its pointwise normalization loop.
 
 | Method          | Toolchain          | ElemCount |        Mean |     Error |    StdDev | Ratio | Code Size |
 | --------------- | ------------------ | --------- | ----------: | --------: | --------: | ----: | --------: |
@@ -459,7 +459,7 @@ An `IReadOnlyList<T>` parameter alone does not establish the same contract: its 
 
 ### Benchmarks
 
-[Source](/tests/Benchmarks/ListArrayBuilding.cs). `DirectArray_Gen` provides a direct-allocation reference; `DynamicList_Gen` exercises a counting loop; `DynamicList_Enumer` intentionally enumerates through `IReadOnlyList<int>`.
+[Source](../tests/Benchmarks/ListArrayBuilding.cs). `DirectArray_Gen` provides a direct-allocation reference; `DynamicList_Gen` exercises a counting loop; `DynamicList_Enumer` intentionally enumerates through `IReadOnlyList<int>`.
 
 | Method             | Toolchain          | Count |         Mean |      Error |     StdDev | Ratio | RatioSD |   Gen0 |   Gen1 | Allocated | Alloc Ratio |
 | ------------------ | ------------------ | ----- | -----------: | ---------: | ---------: | ----: | ------: | -----: | -----: | --------: | ----------: |
