@@ -5,6 +5,7 @@
 - [Loop Vectorization](#loop-vectorization)
 - [Pre-size Lists / Array Builder Opts](#pre-size-lists--array-builder-opts)
 - [Scalar Replacement](#scalar-replacement)
+- [Reflection Folding](#reflection-folding)
 - [Algebraic Simplification](#algebraic-simplification)
 - [Common Sub-expression Elimination](#common-sub-expression-elimination)
 - [Assertion Propagation](#assertion-propagation)
@@ -533,6 +534,23 @@ public static int SROA_ClassEnumerator(int[] array)
 ```
 
 The sealed enumerator has no disposal contract. An enumerator with observable `Dispose()` behavior retains that behavior and its exception scope. Pinned, exposed, and exception-sensitive locals retain storage, and representation-changing stores preserve truncation and rounding. Constructor expansion follows the [inlining size policy](#inlining-policy), so an eligible allocation can remain when expanding its constructor would exceed the caller's budget.
+
+## Reflection Folding
+
+Statically known reflection accesses can become field loads, field stores, and method calls. Property accesses call their getters or setters. The default pipeline applies reflection folding before inlining and revisits accesses after inlining exposes constant types and member names.
+
+The pass recognizes closed `typeof(T)` values and exact-type `GetType()` results, followed by `GetField`, `GetMethod`, or `GetProperty` with a constant name and optional constant binding flags. Supported flags are `Public`, `NonPublic`, `Instance`, `Static`, and `DeclaredOnly`. A lookup must identify one declared member; inherited members and names that collide with base members remain reflective unless `DeclaredOnly` excludes the base members.
+
+| Operation | Eligible accesses |
+| --- | --- |
+| `FieldInfo.GetValue` | Accessible fields whose values can be boxed or returned as object references |
+| `FieldInfo.SetValue` | Mutable, accessible fields with compatible reference values or exactly typed boxed values; 64-bit numeric and struct stores remain reflective |
+| `MethodInfo.Invoke` | Nongeneric methods with compatible arguments supplied through `null`, `Array.Empty<object>()`, or a local argument array whose contents are known at invocation |
+| `PropertyInfo.GetValue` / `SetValue` | Non-indexed properties with an accessible accessor and compatible values |
+
+Instance accesses require a receiver proven non-null and compatible with the declaring type. Boxed struct receivers retain their identity and mutations. Method calls preserve virtual dispatch, boxed results, and `TargetInvocationException` wrapping; the full `Invoke` overload also supports `BindingFlags.DoNotWrapExceptions` with null binder and culture arguments. Invocations requiring wrapping remain reflective inside exception filters or when the caller's non-Exception wrapping policy differs from the runtime library's policy. Unsupported conversions, possible `Type.Missing` arguments, custom binders, `ref`/`out` parameters, and unresolved receivers retain their reflection calls.
+
+Unused member-discovery calls are removed when their successful lookup is established. Discovery remains when other code observes the metadata or `CompilationSettings.PreserveTrimmingDependencies` is enabled. A `GetType()` call on a potentially null receiver retains its null check even when a subsequent static access folds.
 
 ## Algebraic Simplification
 
