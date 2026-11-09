@@ -4,7 +4,7 @@ using System.Reflection;
 using Cilica.AsmIO;
 using Cilica.Passes;
 
-public class FoldReflectionTests
+public partial class FoldReflectionTests
 {
     [Theory]
     [InlineData("Fields", 42)]
@@ -207,16 +207,18 @@ public class FoldReflectionTests
     {
         readonly ModuleResolver _resolver = new();
         readonly ModuleDef _module;
+        readonly string _typeName;
         public MethodDef Method { get; }
         public MethodInfo Original { get; }
 
-        public Case(string name)
+        public Case(string name, string typeName = "ReflectionCases")
         {
+            _typeName = typeName;
             _resolver.AddTrustedSearchPaths();
             string path = Path.Combine(AppContext.BaseDirectory, "TestAsm.dll");
             _module = _resolver.Load(path);
-            Method = (MethodDef)_module.FindType(null, "ReflectionCases")!.FindMethod(name);
-            Original = Assembly.Load(File.ReadAllBytes(path)).GetType("ReflectionCases")!.GetMethod(name)!;
+            Method = (MethodDef)_module.FindType(null, typeName)!.FindMethod(name);
+            Original = Assembly.Load(File.ReadAllBytes(path)).GetType(typeName)!.GetMethod(name)!;
         }
 
         public void Optimize(bool defaultPipeline = false, bool preserveTrimmingDependencies = false)
@@ -236,7 +238,7 @@ public class FoldReflectionTests
         {
             using var output = new MemoryStream();
             _module.Save(output, null, _module.ModName);
-            return Assembly.Load(output.ToArray()).GetType("ReflectionCases")!.GetMethod(Method.Name)!;
+            return Assembly.Load(output.ToArray()).GetType(_typeName)!.GetMethod(Method.Name)!;
         }
 
         public void UseNonExceptionThrow(bool wrap)
@@ -249,6 +251,21 @@ public class FoldReflectionTests
                 MaxStack = 1,
                 Instructions = new[] { new ILInstruction(ILCode.Ldstr, "raw"), new ILInstruction(ILCode.Throw) { Offset = 5 } }
             };
+        }
+
+        public void AddDelegateTypeInitializer(bool beforeFieldInit)
+        {
+            var owner = _module.FindType(null, _typeName)!;
+            var delegateType = owner.NestedTypes.Single(type => type.Name == "RefAction");
+            if (beforeFieldInit) delegateType.Attribs |= TypeAttributes.BeforeFieldInit;
+            else delegateType.Attribs &= ~TypeAttributes.BeforeFieldInit;
+            var initializer = delegateType.CreateMethod(".cctor", PrimType.Void, [],
+                MethodAttributes.Private | MethodAttributes.Static | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName);
+            initializer.Body = new Cilica.IR.MethodBody(initializer);
+            var builder = new Cilica.IR.Utils.IRBuilder(initializer.Body.CreateBlock());
+            builder.CreateFieldStore(owner.FindField("Result"), null, Cilica.IR.ConstInt.CreateI(42));
+            builder.CreateReturn();
+            initializer.ILBody = Cilica.CodeGen.Cil.ILGenerator.GenerateCode(initializer.Body);
         }
 
         public void Dispose() => _resolver.Dispose();

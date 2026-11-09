@@ -537,7 +537,7 @@ The sealed enumerator has no disposal contract. An enumerator with observable `D
 
 ## Reflection Folding
 
-Statically known reflection accesses can become field loads, field stores, and method calls. Property accesses call their getters or setters. The default pipeline applies reflection folding before inlining and revisits accesses after inlining exposes constant types and member names.
+Statically known reflection accesses can become field loads, field stores, method calls, delegate construction, and function-pointer loads. Property accesses call their getters or setters. The default pipeline applies reflection folding before inlining and revisits accesses after inlining exposes constant types and member names.
 
 The pass recognizes closed `typeof(T)` values and exact-type `GetType()` results, followed by `GetField`, `GetMethod`, or `GetProperty` with a constant name and optional constant binding flags. Supported flags are `Public`, `NonPublic`, `Instance`, `Static`, and `DeclaredOnly`. A lookup must identify one declared member; inherited members and names that collide with base members remain reflective unless `DeclaredOnly` excludes the base members.
 
@@ -547,8 +547,14 @@ The pass recognizes closed `typeof(T)` values and exact-type `GetType()` results
 | `FieldInfo.SetValue` | Mutable, accessible fields with compatible reference values or exactly typed boxed values; 64-bit numeric and struct stores remain reflective |
 | `MethodInfo.Invoke` | Nongeneric methods with compatible arguments supplied through `null`, `Array.Empty<object>()`, or a local argument array whose contents are known at invocation |
 | `PropertyInfo.GetValue` / `SetValue` | Non-indexed properties with an accessible accessor and compatible values |
+| `MethodInfo.CreateDelegate` / `Delegate.CreateDelegate` | Known delegate types and methods with matching signatures, including generic `CreateDelegate<T>()` overloads and the `MethodInfo`-based static factory overloads |
+| `MethodInfo.MethodHandle` / `RuntimeMethodHandle.GetFunctionPointer` | Known static methods; pointer lookup requires a local handle whose value is established and cannot be changed through an alias |
 
-Instance accesses require a receiver proven non-null and compatible with the declaring type. Boxed struct receivers retain their identity and mutations. Method calls preserve virtual dispatch, boxed results, and `TargetInvocationException` wrapping; the full `Invoke` overload also supports `BindingFlags.DoNotWrapExceptions` with null binder and culture arguments. Invocations requiring wrapping remain reflective inside exception filters or when the caller's non-Exception wrapping policy differs from the runtime library's policy. Unsupported conversions, possible `Type.Missing` arguments, custom binders, `ref`/`out` parameters, and unresolved receivers retain their reflection calls.
+Instance accesses require a receiver proven non-null and compatible with the declaring type. Boxed struct receivers retain their identity and mutations. Method calls preserve virtual dispatch, boxed results, and `TargetInvocationException` wrapping; the full `Invoke` overload also supports `BindingFlags.DoNotWrapExceptions` with null binder and culture arguments. Invocations requiring wrapping remain reflective inside exception filters or when the caller's non-Exception wrapping policy differs from the runtime library's policy. Reflective invocation with unsupported conversions, possible `Type.Missing` arguments, custom binders, `ref`/`out` parameters, or unresolved receivers retains its runtime calls.
+
+Delegate folding supports open static and instance methods, closed instance methods with proven non-null receivers, and static methods bound to a reference-type first argument, including null. Parameter and return signatures must match exactly; compatible `ref` parameters and returns are supported. Virtual dispatch, captured object identity, and delegate-type initialization are preserved. Closed null instance targets, signature variance, and name-based factory overloads remain reflective. Subsequent optimizations can turn eligible delegate invocations into direct calls.
+
+Function-pointer folding preserves managed calling conventions and unmanaged entry points for methods marked `UnmanagedCallersOnly`. Instance method handles, generic method definitions, and pointer lookups through reassigned or exposed local handles remain reflective. These pointers retain the initialization behavior of taking a method address; target type initialization occurs when required by invocation.
 
 Unused member-discovery calls are removed when their successful lookup is established. Discovery remains when other code observes the metadata or `CompilationSettings.PreserveTrimmingDependencies` is enabled. A `GetType()` call on a potentially null receiver retains its null check even when a subsequent static access folds.
 

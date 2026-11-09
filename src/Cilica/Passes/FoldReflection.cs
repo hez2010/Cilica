@@ -4,41 +4,55 @@ using System.Reflection;
 using Cilica.Analysis;
 using Cilica.IR.Utils;
 
-/// <summary> Replaces statically resolved reflection accesses with field operations and calls. </summary>
-public sealed class FoldReflection : IMethodPass
+/// <summary> Replaces statically resolved reflection with direct member operations. </summary>
+public sealed partial class FoldReflection : IMethodPass
 {
     public MethodPassResult Run(MethodTransformContext ctx)
     {
         long revision = ctx.Method.Revision;
         long controlFlowRevision = ctx.Method.ControlFlowRevision;
         var lookups = new Dictionary<CallInst, ReflectionLookup.Result?>();
+        var typeValues = new HashSet<CallInst>();
         var access = new InliningAccess(ctx.Definition.DeclaringType);
 
         foreach (var call in ctx.Method.Instructions().OfType<CallInst>().ToArray()) {
-            if (call.IsStatic || call.IsTailCall || call.IsReadOnly || call.Constraint != null ||
-                call.Args[0] is not CallInst lookup) continue;
+            if (call.IsTailCall || call.IsReadOnly || call.Constraint != null) continue;
 
-            if (!lookups.TryGetValue(lookup, out var resolved)) {
+            var creation = DelegateCreation.Match(call, ctx.Module.Resolver);
+            Value? source = creation?.MethodInfo ?? (call.IsStatic ? null : call.Args[0]);
+            ReflectionLookup.Result? resolved = null;
+            if (source is CallInst lookup && !lookups.TryGetValue(lookup, out resolved)) {
                 lookups.Add(lookup, resolved = ReflectionLookup.Resolve(lookup));
+            }
+            if (resolved == null && GetFunctionPointerTarget(call) is { } pointerTarget) {
+                resolved = new(pointerTarget, pointerTarget.DeclaringType);
             }
             if (resolved == null) continue;
 
             var originalCall = ctx.Logger.IsEnabled(LogLevel.Trace) ? call.ToString() : null;
             var block = call.Block;
             bool changed = resolved.Member switch {
+                MethodDefOrSpec method when creation != null => FoldDelegate(call, creation, method, access),
+                MethodDefOrSpec method when IsFunctionPointerCall(call) => FoldFunctionPointer(call, method, access),
+                MethodDefOrSpec method when IsMethodHandleCall(call) => FoldMethodHandle(ctx, call, method, access),
                 FieldDesc field => FoldField(call, field, access),
                 MethodDefOrSpec method => FoldMethod(ctx, call, method, access),
                 PropertyDef property => FoldProperty(ctx, call, property, resolved.ReflectedType, access),
                 _ => false
             };
-            if (changed) ctx.Logger.Trace($"Folded reflection access '{originalCall}' in '{block}' to '{resolved.Member}'.");
+            if (changed) {
+                ctx.Logger.Trace($"Folded reflection access '{originalCall}' in '{block}' to '{resolved.Member}'.");
+                if (creation?.TypeValue is CallInst typeValue) typeValues.Add(typeValue);
+            }
         }
 
         if (!ctx.Compilation.Settings.PreserveTrimmingDependencies) {
             foreach (var (lookup, resolved) in lookups) {
                 if (resolved == null || lookup.NumUses != 0) continue;
-                var typeValue = (CallInst)lookup.Args[0];
+                typeValues.Add((CallInst)lookup.Args[0]);
                 lookup.Remove();
+            }
+            foreach (var typeValue in typeValues) {
                 // GetType on a potentially null receiver still performs validation.
                 if (typeValue.NumUses == 0 && (typeValue.Method.Name == "GetTypeFromHandle" ||
                     IsNonNull(typeValue.Args[0]))) typeValue.Remove();
