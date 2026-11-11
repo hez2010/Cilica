@@ -84,11 +84,34 @@ internal static class VirtualDispatch
         readonly List<Slot> _slots = new();
         readonly Dictionary<MethodKey, int> _methodSlots = new();
         readonly HashSet<MethodKey> _methodImplBodies = new();
+        readonly Dictionary<TypeDef, ILookup<string, MethodDef>> _methodsByName = new();
+        readonly Dictionary<TypeDefOrSpec, HashSet<TypeDefOrSpec>> _interfacesByType = new(ReferenceEqualityComparer.Instance);
+        readonly Dictionary<TypeDefOrSpec, ILookup<MethodKey, (MethodDefOrSpec Declaration, MethodDefOrSpec Body)>> _implementations = new(ReferenceEqualityComparer.Instance);
+        TypeDefOrSpec[]? _interfaces;
+        ILookup<TypeDef, TypeDefOrSpec>? _interfaceInstantiations;
         Dictionary<MethodDefOrSpec, MethodDesc?>? _results;
         bool? _classSlotsValid;
 
         MethodDefOrSpec Bind(MethodDef method, TypeDefOrSpec owner)
             => method.GetSpec(new GenericContext(owner.GenericParams, methodArguments));
+
+        ILookup<string, MethodDef> Methods(TypeDefOrSpec owner)
+        {
+            if (!_methodsByName.TryGetValue(owner.Definition, out var methods)) {
+                methods = owner.Definition.Methods.ToLookup(method => method.Name, StringComparer.Ordinal);
+                _methodsByName.Add(owner.Definition, methods);
+            }
+            return methods;
+        }
+
+        HashSet<TypeDefOrSpec> InterfacesOf(TypeDefOrSpec owner)
+        {
+            if (!_interfacesByType.TryGetValue(owner, out var interfaces)) {
+                interfaces = ImplementedInterfaces(owner).ToHashSet();
+                _interfacesByType.Add(owner, interfaces);
+            }
+            return interfaces;
+        }
 
         public MethodDesc? Resolve(MethodDefOrSpec requested)
         {
@@ -114,7 +137,7 @@ internal static class VirtualDispatch
 
         bool BuildClassSlots()
         {
-            var methodsByName = _hierarchy.Select(type => type.Definition.Methods.ToLookup(method => method.Name)).ToArray();
+            var methodsByName = _hierarchy.Select(Methods).ToArray();
             for (int depth = 0; depth < _hierarchy.Count; depth++) {
                 var owner = _hierarchy[depth];
                 var inherited = _slots.Select(slot => slot.Implementation).ToArray();
@@ -227,7 +250,7 @@ internal static class VirtualDispatch
             // parameter context. Search instantiated signatures, retaining
             // ambiguity rather than choosing a declaration by metadata order.
             for (var owner = method.DeclaringType as TypeDefOrSpec; owner != null; owner = owner.BaseType) {
-                var matches = owner.Definition.Methods.Where(candidate => candidate.GenericParams.Length == methodArguments.Count)
+                var matches = Methods(owner)[method.Name].Where(candidate => candidate.GenericParams.Length == methodArguments.Count)
                     .Select(candidate => Bind(candidate, owner)).Where(candidate => SameSignature(candidate, method)).ToArray();
                 if (matches.Length != 0) return matches.Length == 1 ? matches[0] : null;
             }
@@ -236,7 +259,7 @@ internal static class VirtualDispatch
 
         MethodDesc? ResolveInterface(MethodDefOrSpec requested)
         {
-            var interfaces = _hierarchy.SelectMany(ImplementedInterfaces)
+            var interfaces = _interfaces ??= _hierarchy.SelectMany(InterfacesOf)
                 .Concat(actualType.IsInterface ? [actualType] : Array.Empty<TypeDefOrSpec>()).Distinct().ToArray();
             var instantiated = SelectInterfaceInstantiation(requested, interfaces);
             if (instantiated == null) return null;
@@ -256,7 +279,7 @@ internal static class VirtualDispatch
                 if (!CanProvideImplicitImplementation(requested, depth, implementation != null)) continue;
 
                 for (int parent = depth; parent > interfaceOwner; parent--) {
-                    var matches = _hierarchy[parent].Definition.Methods
+                    var matches = Methods(_hierarchy[parent])[requested.Name]
                         .Where(candidate => candidate.IsPublic && !candidate.IsStatic &&
                             candidate.Attribs.HasFlag(MethodAttributes.Virtual) &&
                             candidate.GenericParams.Length == methodArguments.Count)
@@ -277,12 +300,13 @@ internal static class VirtualDispatch
 
         MethodDefOrSpec? SelectInterfaceInstantiation(MethodDefOrSpec requested, TypeDefOrSpec[] interfaces)
         {
-            var alternatives = interfaces.Where(itf => itf.Definition == requested.DeclaringType.Definition).ToArray();
+            _interfaceInstantiations ??= interfaces.ToLookup(itf => itf.Definition);
+            var alternatives = _interfaceInstantiations[requested.DeclaringType.Definition];
             // Distinct open interfaces can collapse after substitution. An
             // otherwise unique exact map is stable across generic instantiations.
             if (actualType.IsUnboundGeneric && alternatives.Any(itf =>
                 itf != requested.DeclaringType && (itf.IsUnboundGeneric || requested.DeclaringType.IsUnboundGeneric))) return null;
-            if (interfaces.Contains(requested.DeclaringType)) return requested;
+            if (alternatives.Contains(requested.DeclaringType)) return requested;
 
             var compatible = alternatives.Where(itf => itf.IsAssignableTo(requested.DeclaringType)).ToArray();
             return compatible.Length == 1
@@ -292,21 +316,28 @@ internal static class VirtualDispatch
         bool CanProvideImplicitImplementation(MethodDefOrSpec requested, int depth, bool hasImplementation)
         {
             if (requested.IsStatic) return false;
-            if (ImplementedInterfaces(_hierarchy[depth]).Contains(requested.DeclaringType)) return true;
+            if (InterfacesOf(_hierarchy[depth]).Contains(requested.DeclaringType)) return true;
 
             // A class can fill an unimplemented interface inherited through an
             // abstract base without listing the interface again.
             if (hasImplementation || depth == 0 || !_hierarchy[depth - 1].Attribs.HasFlag(TypeAttributes.Abstract)) return false;
-            return _hierarchy.Take(depth).SelectMany(ImplementedInterfaces).Contains(requested.DeclaringType);
+            return _hierarchy.Take(depth).Any(owner => InterfacesOf(owner).Contains(requested.DeclaringType));
         }
 
         IEnumerable<MethodDefOrSpec> FindMethodImplementations(TypeDefOrSpec owner, MethodDefOrSpec requested)
         {
-            var context = new GenericContext(owner.GenericParams, methodArguments);
-            foreach (var (declaration, body) in owner.Definition.MethodImpls) {
-                if (SameMethod(ResolveDeclaration(declaration.GetSpec(context)), requested)) {
-                    yield return Bind(body, owner);
+            if (!_implementations.TryGetValue(owner, out var implementations)) {
+                var context = new GenericContext(owner.GenericParams, methodArguments);
+                var entries = new List<(MethodDefOrSpec Declaration, MethodDefOrSpec Body)>();
+                foreach (var (declaration, body) in owner.Definition.MethodImpls) {
+                    if (body.GenericParams.Length != methodArguments.Count) continue;
+                    if (ResolveDeclaration(declaration.GetSpec(context)) is { } resolved) entries.Add((resolved, Bind(body, owner)));
                 }
+                implementations = entries.ToLookup(entry => Key(entry.Declaration));
+                _implementations.Add(owner, implementations);
+            }
+            foreach (var (declaration, body) in implementations[Key(requested)]) {
+                if (SameMethod(declaration, requested)) yield return body;
             }
         }
 
@@ -320,7 +351,7 @@ internal static class VirtualDispatch
                 }
             }
             var mostSpecific = candidates.Where(candidate => !candidates.Any(other => other.Owner != candidate.Owner &&
-                ImplementedInterfaces(other.Owner).Contains(candidate.Owner))).ToArray();
+                InterfacesOf(other.Owner).Contains(candidate.Owner))).ToArray();
             return mostSpecific.Length == 1 ? mostSpecific[0].Method : null;
         }
     }

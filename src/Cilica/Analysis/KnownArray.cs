@@ -1,9 +1,9 @@
 namespace Cilica.Analysis;
 
 /// <summary> The contents of a private, straight-line array at one consuming call. </summary>
-internal sealed record KnownArray(Value[] Values, Instruction? Allocation, Instruction[] Stores, Instruction[] Addresses)
+internal sealed record KnownArray(Value[] Values, Instruction? Allocation, Instruction[] Stores, Instruction[] Addresses, bool IsObserved = false)
 {
-    public static bool TryRead(Value value, CallInst consumer, int count, out KnownArray result,
+    public static bool TryRead(Value value, CallInst consumer, int count, InstructionOrder order, out KnownArray result,
         TypeDesc? elementType = null, bool allowNull = true)
     {
         result = null!;
@@ -13,13 +13,14 @@ internal sealed record KnownArray(Value[] Values, Instruction? Allocation, Instr
             return true;
         }
         if (value is not CilIntrinsic.NewArray { StaticArgs.Length: 0 } allocation) return false;
-        if (allocation.ElemType != elementType || allocation.Block != consumer.Block) return false;
+        if (allocation.ElemType != elementType || !order.PrecedesInBlock(allocation, consumer)) return false;
         if (allocation.Args[0] is not ConstInt length || length.Value != count) return false;
 
-        // Every use must either initialize a constant index or pass the array to
-        // this consumer. An escaping array or element address is not a known value.
+        // Only element reads/writes and this consumer may use the array.
+        // An escaping array or element address is not a known value.
         var addresses = new HashSet<Instruction>();
         var stores = new HashSet<Instruction>();
+        bool observed = false;
         int consumerUses = 0;
         foreach (var (user, operand) in allocation.Uses()) {
             if (user == consumer) {
@@ -30,26 +31,30 @@ internal sealed record KnownArray(Value[] Values, Instruction? Allocation, Instr
             if (address.Index is not ConstInt index || index.Value < 0 || index.Value >= count) return false;
             addresses.Add(address);
             foreach (var (use, position) in address.Uses()) {
-                if (use is not StoreInst store || position != 0 || store.ElemType != elementType || store.Flags != PointerFlags.None) return false;
-                stores.Add(store);
+                if (position != 0) return false;
+                if (use is LoadInst load && load.ElemType == elementType) {
+                    observed = true;
+                } else if (use is StoreInst store && store.ElemType == elementType && store.Flags == PointerFlags.None) {
+                    stores.Add(store);
+                } else return false;
             }
         }
         if (consumerUses != 1) return false;
 
-        // Read stores in program order so repeated writes select their last value.
-        // All initialization must lie between allocation and consumption.
+        // The allocation and consumer share a straight-line prefix. Only writes
+        // in that prefix can initialize this array before consumption.
         var values = Enumerable.Repeat<Value>(ConstNull.Create(), count).ToArray();
-        var remaining = new HashSet<Instruction>(stores.Concat(addresses));
-        for (var instruction = allocation.Next!; instruction != consumer; instruction = instruction.Next!) {
-            if (!remaining.Remove(instruction)) continue;
-            if (instruction is StoreInst store) {
-                var address = (ArrayAddrInst)store.Address;
-                int index = (int)((ConstInt)address.Index).Value;
+        var lastWrites = new int[count];
+        foreach (StoreInst store in stores) {
+            if (!order.PrecedesInBlock(store, consumer)) continue;
+            int index = (int)((ConstInt)((ArrayAddrInst)store.Address).Index).Value;
+            int position = order.Index(store);
+            if (position > lastWrites[index]) {
                 values[index] = store.Value;
+                lastWrites[index] = position;
             }
         }
-        if (remaining.Count != 0) return false;
-        result = new(values, allocation, stores.ToArray(), addresses.ToArray());
+        result = new(values, allocation, stores.ToArray(), addresses.ToArray(), observed);
         return true;
     }
 
@@ -61,8 +66,9 @@ internal sealed record KnownArray(Value[] Values, Instruction? Allocation, Instr
             call.Method.GenericParams is [var element] && element == elementType;
     }
 
-    public void Remove()
+    public void RemoveIfUnobserved()
     {
+        if (IsObserved) return;
         foreach (var store in Stores) store.Remove();
         foreach (var address in Addresses) address.Remove();
         if (Allocation?.NumUses == 0) Allocation.Remove();

@@ -1,8 +1,10 @@
 namespace Cilica.Tests.Passes;
 
 using System.Reflection;
+using System.Runtime.Loader;
 using System.Runtime.CompilerServices;
 using Cilica.AsmIO;
+using Cilica.CodeGen.Cil;
 using Cilica.IR;
 using Cilica.IR.Utils;
 using Cilica.Passes;
@@ -86,6 +88,73 @@ partial class FoldReflectionTests
         Assert.True(manager.ApplyPasses([body.Definition]).Succeeded);
         Assert.Equal(corelib, body.Definition.Body!.Instructions().OfType<CallInst>().Any(call => IsReflectionFactory(call.Method)));
         Assert.DoesNotContain(module.GetCustomAttribs(forAssembly: true), attribute => attribute.Type.Name == "IgnoresAccessChecksToAttribute");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DisabledCrossAssemblyOptimizationKeepsDependenciesReplaceable(bool changeArrayElementBase)
+    {
+        using var resolver = new ModuleResolver();
+        resolver.AddTrustedSearchPaths();
+        var module = resolver.Create("Caller_" + Guid.NewGuid().ToString("N"));
+        var library = resolver.Create("Library_" + Guid.NewGuid().ToString("N"));
+        var target = library.CreateType(null, "Target");
+        var baseType = module.CreateType(null, "ElementBase");
+        if (changeArrayElementBase) target.SetBaseType(baseType);
+        var method = module.CreateType(null, "Caller").CreateMethod("Run", PrimType.Object,
+            changeArrayElementBase ? [new ParamDef(target.CreateArray(), "value")] : [], MethodAttributes.Public | MethodAttributes.Static);
+        var original = method.Body = new MethodBody(method);
+        var builder = new IRBuilder(original.CreateBlock());
+        var typeType = resolver.Import(typeof(Type));
+        var fieldInfo = resolver.Import(typeof(FieldInfo));
+        var getField = typeType.FindMethod("GetField", new MethodSig(fieldInfo, [PrimType.String], true));
+        if (changeArrayElementBase) {
+            var holder = module.CreateType(null, "Holder");
+            holder.CreateField("Value", baseType.CreateArray());
+            var constructor = holder.CreateMethod(".ctor", PrimType.Void, [new ParamDef(holder, "this")], MethodAttributes.Public | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName);
+            constructor.Body = new MethodBody(constructor);
+            var initialize = new IRBuilder(constructor.Body.CreateBlock());
+            initialize.CreateCall(resolver.Import(typeof(object)).FindMethod(".ctor"), constructor.Body.Args[0]);
+            initialize.CreateReturn();
+            constructor.ILBody = ILGenerator.GenerateCode(constructor.Body);
+            var receiver = builder.CreateNewObj(constructor);
+            var reflected = builder.CreateCall(typeType.FindMethod("GetTypeFromHandle"), builder.Emit(new CilIntrinsic.LoadHandle(resolver, holder)));
+            var field = builder.CreateCallVirt(getField, reflected, ConstString.Create("Value"));
+            builder.CreateCallVirt(fieldInfo.FindMethod("SetValue", new MethodSig(PrimType.Void, [PrimType.Object, PrimType.Object], true)), field, receiver, original.Args[0]);
+            builder.CreateReturn(ConstString.Create("stored"));
+        } else {
+            var reflected = builder.CreateCall(typeType.FindMethod("GetTypeFromHandle"), builder.Emit(new CilIntrinsic.LoadHandle(resolver, target)));
+            builder.CreateReturn(builder.CreateCallVirt(getField, reflected, ConstString.Create("Added")));
+        }
+        var manager = new PassManager { Compilation = new Compilation(module, new VoidLogger(), new() { AllowCrossAssemblyIPO = false, VerifyEachPass = true }) };
+        manager.AddPasses().Apply<FoldReflection>();
+        Assert.True(manager.Run([method]).Succeeded);
+        var optimized = method.Body!;
+        if (changeArrayElementBase) target.SetBaseType(resolver.Import(typeof(object)));
+        else target.CreateField("Added", PrimType.Int32, FieldAttributes.Static | FieldAttributes.Public);
+        foreach (var body in new[] { original, optimized }) {
+            method.ILBody = ILGenerator.GenerateCode(body);
+            var images = new[] { module, library }.ToDictionary(item => item.AsmName.Name!, item => {
+                using var stream = new MemoryStream();
+                item.Save(stream, null, item.ModName);
+                return stream.ToArray();
+            });
+            var context = new AssemblyLoadContext(null, isCollectible: true);
+            context.Resolving += (_, name) => images.TryGetValue(name.Name!, out var image) ? context.LoadFromStream(new MemoryStream(image)) : null;
+            try {
+                var assembly = context.LoadFromStream(new MemoryStream(images[module.AsmName.Name!]));
+                var run = assembly.GetType("Caller")!.GetMethod("Run")!;
+                if (changeArrayElementBase) {
+                    var element = context.LoadFromAssemblyName(new AssemblyName(library.AsmName.Name!)).GetType("Target")!;
+                    var error = Assert.Throws<TargetInvocationException>(() => run.Invoke(null, [Array.CreateInstance(element, 0)]));
+                    Assert.IsType<ArgumentException>(error.InnerException);
+                } else {
+                    var field = (FieldInfo)run.Invoke(null, null)!;
+                    Assert.Equal("Added", field.Name);
+                }
+            } finally { context.Unload(); }
+        }
     }
 
     private static MethodBody CreatePrivateDelegateCaller(ModuleDef module, TypeDefOrSpec target)

@@ -4,6 +4,9 @@ using System.Diagnostics.CodeAnalysis;
 
 public static unsafe class ReflectionGenericCases
 {
+    public static object GenericArityLookup()
+        => typeof(Target).GetMethod(nameof(Target.GenericChoice), 1, [typeof(int)])!.MakeGenericMethod(typeof(string)).Invoke(null, new object[] { 42 })!;
+
     public static object MethodDelegate()
         => typeof(Target).GetMethod(nameof(Target.Echo))!.MakeGenericMethod(typeof(int)).CreateDelegate<Func<int, int>>()(42);
 
@@ -60,6 +63,14 @@ public static unsafe class ReflectionGenericCases
             .MakeGenericMethod(typeof(T)).MethodHandle.GetFunctionPointer();
         return pointer(value);
     }
+
+    public static RuntimeMethodHandle InstanceHandle() => typeof(Owner<int>).GetMethod("Read")!.MethodHandle;
+
+    public static RuntimeMethodHandle OpenOwnerHandle() => typeof(Owner<>).GetMethod("Read")!.MethodHandle;
+
+    public static RuntimeMethodHandle AbstractHandle() => typeof(Abstract).GetMethod("Read")!.MethodHandle;
+
+    public static RuntimeMethodHandle GenericDefinitionHandle() => typeof(Target).GetMethod(nameof(Target.Echo))!.MethodHandle;
 
     public static object DerivedOverride()
         => typeof(Derived).GetMethod(nameof(Derived.Read))!.Invoke(new Derived(), null)!;
@@ -310,6 +321,10 @@ public static unsafe class ReflectionGenericCases
 
     public static class Target
     {
+        public static int GenericChoice<T>(int value) => value;
+
+        public static int GenericChoice(int value) => -value;
+
         public static T Echo<T>(T value) => value;
         public static T StructEcho<T>(T value) where T : struct => value;
         public static T ReferenceEcho<T>(T value) where T : class => value;
@@ -319,6 +334,7 @@ public static unsafe class ReflectionGenericCases
 
     public class Owner<T>
     {
+        public int Read() => 42;
         public static T Echo(T value) => value;
         public static string Describe<U>(U value) => typeof(T).Name + ":" + typeof(U).Name + ":" + value;
         public static (T, U, string) Compose<U>(object state, T left, U right) => (left, right, typeof(T).Name + ":" + typeof(U).Name);

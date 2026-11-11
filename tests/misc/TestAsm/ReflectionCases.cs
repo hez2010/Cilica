@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 
@@ -141,6 +142,18 @@ public static class ReflectionCases
         return !ReferenceEquals(field.GetValue(target), field.GetValue(target));
     }
 
+    public static object LiteralEnum() => typeof(Target).GetField(nameof(Target.EnumConstant))!.GetValue(null)!;
+
+    public static object LiteralString() => typeof(Target).GetField(nameof(Target.StringConstant))!.GetValue(null)!;
+
+    public static bool LiteralNull() => typeof(Target).GetField(nameof(Target.NullConstant))!.GetValue(null) is null;
+
+    public static bool LiteralStringIdentity()
+    {
+        var field = typeof(Target).GetField(nameof(Target.StringConstant))!;
+        return ReferenceEquals(field.GetValue(null), field.GetValue(null));
+    }
+
     public static object Properties()
     {
         var target = new Target();
@@ -211,6 +224,14 @@ public static class ReflectionCases
         object[] arguments = [1];
         arguments[0] = 42;
         return typeof(Target).GetMethod(nameof(Target.Echo))!.Invoke(null, arguments)!;
+    }
+
+    public static int PreparedArrays()
+    {
+        object[] first = [20];
+        object[] second = [22];
+        var method = typeof(Target).GetMethod(nameof(Target.Echo))!;
+        return (int)method.Invoke(null, first)! + (int)method.Invoke(null, second)!;
     }
 
     public static object EmptyArguments()
@@ -334,6 +355,18 @@ public static class ReflectionCases
     public static object PrimitiveConversion()
         => typeof(Target).GetMethod(nameof(Target.LongEcho))!.Invoke(null, new object[] { 42 })!;
 
+    public static object UnsignedWidening()
+        => typeof(Target).GetMethod(nameof(Target.LongEcho))!.Invoke(null, new object[] { uint.MaxValue })!;
+
+    public static bool UnsignedFloatingWidening()
+        => (double)typeof(Target).GetMethod(nameof(Target.DoubleEcho))!.Invoke(null, new object[] { ulong.MaxValue })! == (double)ulong.MaxValue;
+
+    public static object NullableValue()
+        => typeof(Target).GetMethod(nameof(Target.NullableEcho))!.Invoke(null, new object[] { 42 })!;
+
+    public static bool NullableNull()
+        => typeof(Target).GetMethod(nameof(Target.NullableEcho))!.Invoke(null, new object?[] { null }) is null;
+
     public static object NullValueArgument()
         => typeof(Target).GetMethod(nameof(Target.Echo))!.Invoke(null, new object?[] { null })!;
 
@@ -348,6 +381,14 @@ public static class ReflectionCases
         try { typeof(Target).GetField(nameof(Target.Value))!.SetValue(new Target(), "hello"); }
         catch (ArgumentException exception) { return exception.GetType().Name; }
         return "unexpected";
+    }
+
+    public static object IndexedSetter()
+    {
+        var receiver = new Target();
+        var property = typeof(Target).GetProperty("Item")!;
+        property.SetValue(receiver, 42, [2]);
+        return property.GetValue(receiver, [2])!;
     }
 
     public static object IndexedProperty()
@@ -369,8 +410,65 @@ public static class ReflectionCases
         return arguments[0];
     }
 
+    public static object RefAndOutCopyBack()
+    {
+        object[] arguments = [1, null!];
+        typeof(Target).GetMethod(nameof(Target.Update))!.Invoke(null, arguments);
+        return arguments[0] + ":" + arguments[1];
+    }
+
+    public static object RefNullableCopyBack()
+    {
+        object?[] arguments = [null];
+        typeof(Target).GetMethod(nameof(Target.ReplaceNullable))!.Invoke(null, arguments);
+        return arguments[0]!;
+    }
+
+    public static bool RefValueCopiesBox()
+    {
+        object original = 42;
+        object[] arguments = [original];
+        typeof(Target).GetMethod(nameof(Target.ObserveReference))!.Invoke(null, arguments);
+        return !ReferenceEquals(original, arguments[0]);
+    }
+
+    public static bool NullableArgumentCopiesBox()
+    {
+        object original = 42;
+        object[] arguments = [original];
+        typeof(Target).GetMethod(nameof(Target.NullableEcho))!.Invoke(null, arguments);
+        return !ReferenceEquals(original, arguments[0]);
+    }
+
+    public static bool WideningKeepsOriginalBox()
+    {
+        object original = 42;
+        object[] arguments = [original];
+        typeof(Target).GetMethod(nameof(Target.LongEcho))!.Invoke(null, arguments);
+        return ReferenceEquals(original, arguments[0]);
+    }
+
+    public static object RefReturnValue() => typeof(Target).GetMethod(nameof(Target.RefInt))!.Invoke(null, null)!;
+
+    public static object RefReturnReference() => typeof(Target).GetMethod(nameof(Target.RefString))!.Invoke(null, null)!;
+
+    public static string NullRefReturn()
+    {
+        try { typeof(Target).GetMethod(nameof(Target.NullRef))!.Invoke(null, null); return "no exception"; }
+        catch (TargetInvocationException e) { return e.InnerException!.GetType().Name; }
+    }
+
     public static object BinderArgument()
         => typeof(Target).GetMethod(nameof(Target.Echo))!.Invoke(null, BindingFlags.Default, Type.DefaultBinder, new object[] { 42 }, null)!;
+
+    public static object CompatibleBinder()
+        => typeof(Target).GetMethod(nameof(Target.Echo))!.Invoke(null, BindingFlags.ExactBinding, new RejectingBinder(), [42], CultureInfo.InvariantCulture)!;
+
+    public static string RequiredBinder()
+    {
+        try { typeof(Target).GetMethod(nameof(Target.Echo))!.Invoke(null, BindingFlags.Default, new RejectingBinder(), ["42"], null); return "no exception"; }
+        catch (InvalidOperationException e) { return e.Message; }
+    }
 
     public static object MissingOptionalArgument()
         => typeof(Target).GetMethod(nameof(Target.OptionalObject))!.Invoke(null, new object[] { Type.Missing })!;
@@ -379,6 +477,20 @@ public static class ReflectionCases
     {
         try { return typeof(Target).GetMethod(nameof(Target.ObjectEcho))!.Invoke(null, new object?[] { value }) ?? "null"; }
         catch (ArgumentException exception) { return exception.GetType().Name; }
+    }
+
+    public static long WideIntegerStore()
+    {
+        var receiver = new Target();
+        typeof(Target).GetField("WideValue")!.SetValue(receiver, 0x123456789ABCDEF0L);
+        return receiver.WideValue;
+    }
+
+    public static double WideFloatingStore()
+    {
+        var receiver = new Target();
+        typeof(Target).GetField("RealValue")!.SetValue(receiver, 12345.6789012345);
+        return receiver.RealValue;
     }
 
     public static object WideFieldStore()
@@ -390,6 +502,43 @@ public static class ReflectionCases
 
     public static object InheritedMember()
         => typeof(Target).GetField(nameof(Base.Inherited))!.GetValue(new Target())!;
+
+    public static object InheritedGenericField()
+        => typeof(GenericDerived).GetField("Value")!.GetValue(new GenericDerived { Value = 42 })!;
+
+    public static object InheritedGenericProperty()
+    {
+        var receiver = new GenericDerived();
+        var property = typeof(GenericDerived).GetProperty("Property")!;
+        property.SetValue(receiver, 42);
+        return property.GetValue(receiver)!;
+    }
+
+    public static bool InheritedPrivateAccessor()
+        => typeof(GenericDerived).GetProperty("PrivateSetter")!.GetSetMethod(true) is null;
+
+    public static object InheritedMethod()
+        => typeof(Target).GetMethod("Read")!.Invoke(new Target(), null)!;
+
+    public static object HiddenMethod()
+        => typeof(Target).GetMethod("Hidden")!.Invoke(new Target(), null)!;
+
+    public static object FlattenedField()
+        => typeof(GenericDerived).GetField("StaticNumber", BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy)!.GetValue(null)!;
+
+    public static object SignatureLookup()
+        => typeof(Target).GetMethod(nameof(Target.Overload), [typeof(int)])!.Invoke(null, new object[] { 42 })!;
+
+    public static object WideningSignatureLookup()
+        => typeof(Target).GetMethod(nameof(Target.LongEcho), [typeof(int)])!.Invoke(null, new object[] { 42 })!;
+
+    public static bool VoidPropertyLookup() => typeof(Target).GetProperty(nameof(Target.Property), typeof(void)) is null;
+
+    public static object PropertyTypeLookup()
+        => typeof(LookupDerived).GetProperty("ChangedType", typeof(object))!.GetValue(new LookupDerived())!;
+
+    public static object InterfaceConstant()
+        => typeof(LookupDerived).GetField("Answer", BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy)!.GetValue(null)!;
 
     public static object IgnoreCaseLookup()
         => typeof(Target).GetField("value", BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase)!.GetValue(new Target())!;
@@ -432,6 +581,46 @@ public static class ReflectionCases
         return field.Name + ":" + field.GetValue(new Target());
     }
 
+    public static int InstanceFieldInitialization()
+    {
+        LookupEffects = 0;
+        object target = default(InitializedValue);
+        var field = typeof(InitializedValue).GetField("Value")!;
+        field.SetValue(target, 42);
+        return LookupEffects * 100 + (int)field.GetValue(target)!;
+    }
+
+    public static int InstanceFieldReadInitialization()
+    {
+        LookupEffects = 0;
+        _ = typeof(InitializedValue).GetField("Value")!.GetValue((object)default(InitializedValue));
+        return LookupEffects;
+    }
+
+    public static string FailedInstanceField()
+    {
+        try { return typeof(FailedValue).GetField("Value")!.GetValue((object)default(FailedValue))!.ToString()!; }
+        catch (Exception e) { return e.GetType().Name + ":" + e.InnerException?.GetType().Name; }
+    }
+
+    public static string FailedStaticFieldRead()
+    {
+        try { return typeof(FailedInitialization).GetField("Value")!.GetValue(null)!.ToString()!; }
+        catch (Exception e) { return e.GetType().Name + ":" + e.InnerException?.GetType().Name; }
+    }
+
+    public static string FailedStaticFieldStore()
+    {
+        try { typeof(FailedInitialization).GetField("Value")!.SetValue(null, 42); return "no exception"; }
+        catch (Exception e) { return e.GetType().Name + ":" + e.InnerException?.GetType().Name; }
+    }
+
+    public static object NullStructArgumentInitialization()
+    {
+        LookupEffects = 0;
+        return typeof(Target).GetMethod(nameof(Target.ValueEcho))!.Invoke(null, new object?[] { null })!;
+    }
+
     public static object InitializedField()
         => typeof(Initialized).GetField(nameof(Initialized.Value))!.GetValue(null)!;
 
@@ -468,30 +657,80 @@ public static class ReflectionCases
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void Change(object[] arguments) => arguments[0] = 42;
 
+    public enum WideEnum : ulong { Maximum = ulong.MaxValue }
+
+    public interface IConstant { public const int Answer = 42; }
+
+    public sealed class RejectingBinder : Binder
+    {
+        public override object ChangeType(object value, Type type, CultureInfo? culture) => throw new InvalidOperationException("binder");
+        public override FieldInfo BindToField(BindingFlags bindingAttr, FieldInfo[] match, object value, CultureInfo? culture) => throw new NotSupportedException();
+        public override MethodBase BindToMethod(BindingFlags bindingAttr, MethodBase[] match, ref object?[] args, ParameterModifier[]? modifiers, CultureInfo? culture, string[]? names, out object state) => throw new NotSupportedException();
+        public override void ReorderArgumentArray(ref object?[] args, object state) => throw new NotSupportedException();
+        public override MethodBase SelectMethod(BindingFlags bindingAttr, MethodBase[] match, Type[] types, ParameterModifier[]? modifiers) => throw new NotSupportedException();
+        public override PropertyInfo SelectProperty(BindingFlags bindingAttr, PropertyInfo[] match, Type? returnType, Type[]? indexes, ParameterModifier[]? modifiers) => throw new NotSupportedException();
+    }
+
+    public class LookupBase<T>
+    {
+        public int Field;
+        protected int ProtectedField;
+        internal int InternalField = 1;
+        private int PrivateField = 1;
+        public static int StaticField;
+        public T Value { get; set; } = default!;
+        public object ChangedType => 42;
+        public int PrivateGet { private get; set; }
+        public virtual int Virtual() => 1;
+        public int Hidden() => 1;
+        public void Overload(int value) { }
+        public void Overload(string value) { }
+        private int Private() => PrivateField;
+    }
+
+    public sealed class LookupDerived : LookupBase<string>, IConstant
+    {
+        public override int Virtual() => 42;
+        public new int Hidden() => 42;
+        public new string ChangedType => "derived";
+        public int FIELD;
+        public int Declared;
+    }
+
     public class Base
     {
         public int Inherited = 9;
         public virtual int Compute() => 1;
+        public int Read() => 42;
+        public int Hidden() => 1;
     }
 
     public sealed class Target : Base
     {
         public int Value = 7;
         public long WideValue;
+        public double RealValue;
+        private static int RefValue = 42;
+        private static string RefText = "hello";
         public object? ObjectValue;
         public Counter Counter;
 #pragma warning disable CS0414 // Accessed through reflection.
         private int Secret = 42;
 #pragma warning restore CS0414
+        public const WideEnum EnumConstant = WideEnum.Maximum;
+        public const string StringConstant = "hello";
+        public const object? NullConstant = null;
+
         public static string StaticValue = "initial";
         public static readonly int Readonly = 7;
         public int Property { get => Value + 1; set => Value = value; }
-        public int this[int index] => Value + index;
+        public int this[int index] { get => Value + index; set => Value = value - index; }
         public static int StaticProperty { get; set; }
         public static int FailingProperty => throw new InvalidOperationException("failure");
         public int Add(int value, string text) => value + text.Length;
         public void Set(int value) => Value = value;
         public override int Compute() => 42;
+        public new int Hidden() => 42;
         public static int Echo(int value) => value;
         public static object? ObjectEcho(object? value) => value;
         public static object OptionalObject(object? value = null) => value ?? "default";
@@ -500,9 +739,20 @@ public static class ReflectionCases
         public static int? NullableConstant() => 42;
         public static T? Generic<T>() => default;
         public static int Fail() => throw new InvalidOperationException("failure");
+        public static double DoubleEcho(double value) => value;
+        public static int? NullableEcho(int? value) => value;
+        public static ref int RefInt() => ref RefValue;
+        public static ref string RefString() => ref RefText;
+        public static ref int NullRef() => ref Unsafe.NullRef<int>();
+        public static int ValueEcho(InitializedValue value) => LookupEffects;
+        public static void Update(ref int value, out string text) { value = 42; text = "updated"; }
+        public static void ReplaceNullable(ref int? value) => value = 42;
+        public static void ObserveReference(ref int value) { }
+
         public static void ByRef(ref int value) => value = 42;
         public static int Overload() => 1;
         public static int Overload(int value) => value;
+        public static int Overload(string value) => value.Length;
     }
 
     public struct Counter
@@ -515,7 +765,23 @@ public static class ReflectionCases
     {
         public T? Value;
         public T? Property { get; set; }
+        public T? PrivateSetter { get; private set; }
         public static T? StaticValue;
+        public static int StaticNumber = 42;
+    }
+
+    public sealed class GenericDerived : GenericTarget<int> { }
+
+    public struct InitializedValue
+    {
+        static InitializedValue() => LookupEffects++;
+        public int Value;
+    }
+
+    public struct FailedValue
+    {
+        static FailedValue() => throw new InvalidOperationException();
+        public int Value;
     }
 
     public class Initialized
@@ -527,6 +793,7 @@ public static class ReflectionCases
 
     public class FailedInitialization
     {
+        public static int Value;
         static FailedInitialization() => throw new InvalidOperationException();
         public static int Read() => 42;
     }

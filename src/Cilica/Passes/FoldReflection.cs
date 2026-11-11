@@ -15,17 +15,26 @@ public sealed class FoldReflection : IMethodPass
 internal sealed partial class ReflectionRewriter
 {
     readonly MethodTransformContext _ctx;
-    readonly ReflectionTypeFacts _types;
+    readonly ReflectionTypeFacts _typeFacts;
     readonly ReflectionLookup _lookups;
     readonly InliningAccess _access;
+    readonly InstructionOrder _order;
+    readonly HashSet<CallInst> _filterCalls = new();
 
     public ReflectionRewriter(MethodTransformContext ctx)
     {
         _ctx = ctx;
-        _types = new ReflectionTypeFacts(ctx.Definition);
-        _lookups = new ReflectionLookup(_types);
+        _typeFacts = new ReflectionTypeFacts(ctx.Definition, ctx.Compilation.Settings.AllowCrossAssemblyIPO);
+        _order = new InstructionOrder(ctx.Method);
+        _lookups = new ReflectionLookup(_typeFacts, _order);
         _access = new InliningAccess(ctx.Definition.DeclaringType,
             ignoreVisibility: ctx.Compilation.Module != ctx.Compilation.Resolver.CoreLib);
+        if (ctx.Method.Instructions().OfType<GuardInst>().Any(guard => guard.HasFilter)) {
+            var regions = ctx.GetAnalysis<ProtectedRegionAnalysis>();
+            foreach (var call in ctx.Method.Instructions().OfType<CallInst>()) {
+                if (regions.GetBlockRegion(call.Block).IsFilter) _filterCalls.Add(call);
+            }
+        }
     }
 
     public MethodPassResult Run()
@@ -33,7 +42,9 @@ internal sealed partial class ReflectionRewriter
         long revision = _ctx.Method.Revision;
         long controlFlowRevision = _ctx.Method.ControlFlowRevision;
 
-        foreach (var call in _ctx.Method.Instructions().OfType<CallInst>().ToArray()) {
+        // Rewriting suffixes first leaves earlier arrays and calls together and
+        // bounds the total work of splitting blocks for exception wrappers.
+        foreach (var call in _ctx.Method.Instructions().OfType<CallInst>().Reverse().ToArray()) {
             if (call.IsTailCall || call.IsReadOnly || call.Constraint != null) continue;
             FoldCall(call);
         }
@@ -77,7 +88,7 @@ internal sealed partial class ReflectionRewriter
             MethodDefOrSpec method when IsMethodHandleCall(call) => FoldMethodHandle(call, method),
             FieldDesc field => FoldField(call, field),
             MethodDefOrSpec method => FoldMethod(call, method),
-            PropertyDef property => FoldProperty(call, property, resolved.ReflectedType),
+            PropertyDef => FoldProperty(call, resolved),
             _ => false
         };
         if (changed && call.Block == null) {
@@ -91,10 +102,7 @@ internal sealed partial class ReflectionRewriter
 
         var original = _ctx.Logger.IsEnabled(LogLevel.Trace) ? call.ToString() : null;
         var builder = BuilderBefore(call);
-        var typeType = _ctx.Module.Resolver.Import(typeof(Type));
-        var handle = builder.Emit(new CilIntrinsic.LoadHandle(_ctx.Module.Resolver, type));
-        var replacement = builder.CreateCall(typeType.FindMethod("GetTypeFromHandle",
-            new MethodSig(typeType, [handle.ResultType], false)), handle);
+        var replacement = CreateTypeReference(builder, type);
         call.ReplaceUses(replacement);
         _lookups.ResolveType(replacement);
         _ctx.Logger.Trace($"Folded reflection type construction '{original}' in '{call.Block}' to '{type}'.");
@@ -115,8 +123,10 @@ internal sealed partial class ReflectionRewriter
         bool load = Matches(call, typeof(FieldInfo), "GetValue", PrimType.Object, PrimType.Object);
         bool store = Matches(call, typeof(FieldInfo), "SetValue", PrimType.Void, PrimType.Object, PrimType.Object);
         if (!load && !store) return false;
-        if (!_access.CanUseMember(field) || !_types.IsBoxable(field.Type)) return false;
-        if (field.DeclaringType.IsCorelibType(typeof(Nullable<>)) || field.Attribs.HasFlag(FieldAttributes.Literal)) return false;
+        if (!ReflectionTypeFacts.IsRuntimeType(field.DeclaringType)) return false;
+        if (!_access.CanUseMember(field) || !_typeFacts.IsBoxable(field.Type)) return false;
+        if (field.Attribs.HasFlag(FieldAttributes.Literal)) return load && field is FieldDefOrSpec literal && FoldLiteralField(call, literal);
+        if (field.DeclaringType.IsCorelibType(typeof(Nullable<>))) return false;
         if (!field.IsStatic && !CanUseReceiver(call.Args[1], field.DeclaringType)) return false;
 
         if (store) {
@@ -124,7 +134,11 @@ internal sealed partial class ReflectionRewriter
             if (!CanConvert(call.Args[2], field.Type)) return false;
         }
 
+        bool initialize = field.DeclaringType.RequiresTypeInitialization(fieldAccess: true);
+        if (initialize && _filterCalls.Contains(call)) return false;
+
         var builder = BuilderBefore(call);
+        if (initialize) EmitFieldInitialization(builder, call, field.DeclaringType);
         var receiver = field.IsStatic ? null : ConvertReceiver(builder, call.Args[1], field.DeclaringType);
         var address = builder.CreateFieldAddr(field, receiver, inBounds: true);
         // Reflection's field accessors use acquire/release accesses, including
@@ -134,24 +148,68 @@ internal sealed partial class ReflectionRewriter
             call.ReplaceWith(BoxResult(builder, value));
         } else {
             var value = ConvertArgument(builder, call.Args[2], field.Type);
-            builder.CreateStore(address, value, flags: PointerFlags.Volatile);
+            EmitFieldStore(builder, address, value);
             call.Remove();
         }
         return true;
     }
 
-    // Both invocation and method-address folding require an ordinary, accessible
-    // runtime method. Their signature and binding rules are checked separately.
+    private bool FoldLiteralField(CallInst call, FieldDefOrSpec field)
+    {
+        var constant = ReadConstant(field.Type, field.Definition.DefaultValue);
+        if (constant == null) return false;
+        var builder = BuilderBefore(call);
+        if (constant is ConstString text) {
+            // Metadata string constants are materialized afresh by GetValue.
+            // A span constructor preserves that identity without a char array.
+            var span = _typeFacts.Resolver.Import(typeof(ReadOnlySpan<char>));
+            var stringType = _typeFacts.Resolver.Import(typeof(string));
+            var characters = builder.CreateCall(stringType.FindMethod("op_Implicit", new MethodSig(span, [PrimType.String], false)), text);
+            constant = builder.CreateNewObj(stringType.FindMethod(".ctor", new MethodSig(PrimType.Void, [span], true)), characters);
+        }
+        call.ReplaceWith(BoxResult(builder, constant));
+        return true;
+    }
+
+    private void EmitFieldInitialization(IRBuilder builder, CallInst reflection, TypeDesc owner)
+    {
+        var continuation = CreateExceptionWrapper(builder, reflection, _typeFacts.Resolver.Import(typeof(TypeInitializationException)));
+        builder.CreateTypeInitialization(owner);
+        EndExceptionWrapper(builder, reflection, continuation);
+    }
+
+    private void EmitFieldStore(IRBuilder builder, FieldAddrInst address, Value value)
+    {
+        var type = address.Field.Type;
+        if (type.Kind is TypeKind.Int64 or TypeKind.UInt64 or TypeKind.Double) {
+            var storageType = PrimType.GetFromKind(type.Kind);
+            var write = _typeFacts.Resolver.Import(typeof(System.Threading.Volatile)).FindMethod("Write",
+                new MethodSig(PrimType.Void, [storageType.CreateByref(), storageType], false));
+            Value storage = type == storageType ? address : builder.Emit(new CilIntrinsic.RefCast(storageType.CreateByref(), address));
+            builder.CreateCall(write, storage, value);
+        } else {
+            builder.CreateStore(address, value, flags: PointerFlags.Volatile);
+        }
+    }
+
+    private CallInst CreateTypeReference(IRBuilder builder, TypeDesc type)
+    {
+        var typeType = _typeFacts.Resolver.Import(typeof(Type));
+        var handle = builder.Emit(new CilIntrinsic.LoadHandle(_typeFacts.Resolver, type));
+        return builder.CreateCall(typeType.FindMethod("GetTypeFromHandle", new MethodSig(typeType, [handle.ResultType], false)), handle);
+    }
+
+    // Callable references require a constructed managed method. Boxing, caller
+    // frame, and receiver restrictions depend on the consuming operation.
     private bool CanReferenceMethod(MethodDefOrSpec method)
     {
         if (!ReflectionTypeFacts.IsConstructedMethod(method)) return false;
         if (method.CallConv != CallConvention.Managed || method.IsRuntimeAsync) return false;
         if (method.IsStatic && method.Attribs.HasFlag(MethodAttributes.Virtual)) return false;
-        if (!_types.IsBoxable(method.DeclaringType) || method.DeclaringType.IsCorelibType(typeof(Nullable<>))) return false;
+        if (!_typeFacts.CanInspect(method.DeclaringType)) return false;
 
-        // Emitting the member directly does not reproduce reflection's caller
-        // frame or redirects established by class MethodImpls.
-        if (Compilation.IsFrameSensitive(method) || TypeUtils.HasClassMethodImpls(method)) return false;
+        // Class MethodImpls can redirect direct calls and method addresses.
+        if (TypeUtils.HasClassMethodImpls(method)) return false;
         return _access.CanUseMember(method);
     }
 
@@ -164,11 +222,11 @@ internal sealed partial class ReflectionRewriter
 
     private bool CanUseReceiver(Value receiver, TypeDesc owner)
     {
-        if (!_types.IsNonNull(receiver)) return false;
+        if (!_typeFacts.IsNonNull(receiver)) return false;
         if (owner.IsValueType) return receiver is CilIntrinsic.Box box && box.SourceType == owner;
 
         var receiverType = receiver is CilIntrinsic.Box boxed ? boxed.SourceType : receiver.ResultType;
-        return _types.IsAssignable(receiverType, owner) &&
+        return _typeFacts.IsAssignable(receiverType, owner) &&
             (receiver is not NewObjInst || TypeUtils.HasConcreteType(receiver));
     }
 
@@ -179,23 +237,11 @@ internal sealed partial class ReflectionRewriter
         return builder.Emit(new CilIntrinsic.RefCast(owner, receiver));
     }
 
-    private bool CanConvert(Value value, TypeDesc type)
-    {
-        if (!_types.IsBoxable(type)) return false;
-        if (type.IsValueType || type is GenericParamType) {
-            return !type.IsCorelibType(typeof(Nullable<>)) && value is CilIntrinsic.Box box && box.SourceType == type;
-        }
-        return value is ConstNull || _types.IsAssignable(value.ResultType, type);
-    }
-
     private bool CanStoreField(TypeDesc type)
-        // Reflection can use atomic 64-bit writes even on 32-bit targets. A volatile
-        // IL store does not establish that contract for wide values or arbitrary structs.
-        => type is GenericParamType ? _types.IsReferenceType(type)
-            : type.Kind is not (TypeKind.Int64 or TypeKind.UInt64 or TypeKind.Double or TypeKind.Struct);
-
-    private static Value ConvertArgument(IRBuilder builder, Value value, TypeDesc type)
-        => type.IsValueType || type is GenericParamType ? builder.CreateUnboxObj(type, value) : value;
+        // Arbitrary structs require layout-sensitive copying. Known wide scalars
+        // use Volatile.Write to retain atomicity on 32-bit targets.
+        => type is GenericParamType ? _typeFacts.IsReferenceType(type)
+            : type.Kind != TypeKind.Struct;
 
     private static Value BoxResult(IRBuilder builder, Value value)
         => value.ResultType.IsValueType || value.ResultType is GenericParamType ? builder.CreateBox(value.ResultType, value) : value;
