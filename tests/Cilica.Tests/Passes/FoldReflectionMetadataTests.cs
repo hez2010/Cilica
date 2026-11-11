@@ -12,6 +12,19 @@ using Cilica.Passes;
 partial class FoldReflectionTests
 {
     [Theory]
+    [InlineData("InlinedDefinitionMetadata")]
+    [InlineData("InlinedGenericDefinitionMetadata")]
+    public void InlinedMemberMetadataPreservesDefinitionAndConstructedContexts(string name)
+    {
+        using var test = new Case(name);
+        var expected = (MemberInfo[])test.Original.Invoke(null, null)!;
+        var compilation = new Compilation(test.Method.Module, new VoidLogger(), new() { VerifyEachPass = true });
+        var methods = test.Method.DeclaringType.Methods.Where(method => method == test.Method || method.Name == "DefinitionMetadata").ToArray();
+        Assert.True(CompilationPipeline.CreateDefault(compilation).Run(methods).Succeeded);
+        AssertMetadata(expected, (MemberInfo[])test.Emit().Invoke(null, null)!);
+    }
+
+    [Theory]
     [InlineData("MethodMetadata")]
     [InlineData("FieldMetadata")]
     [InlineData("ConstructorMetadata")]

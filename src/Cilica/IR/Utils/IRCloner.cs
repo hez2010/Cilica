@@ -283,10 +283,15 @@ public class IRCloner
 
         public void Visit(IntrinsicInst inst)
         {
-            // ldtoken of a generic definition means typeof(G<>), even when
-            // cloning into a generic context. Only constructed tokens substitute.
-            var staticArgs = inst is (CilIntrinsic.LoadHandle or CilIntrinsic.Initialization) and { StaticArgs: [TypeDef] }
-                ? inst.StaticArgs.ToArray() : RemapEntities(inst.StaticArgs);
+            // Definition tokens retain their own generic parameters. Only constructed
+            // owners and method arguments use the cloned method's generic context.
+            var staticArgs = inst switch {
+                (CilIntrinsic.LoadHandle or CilIntrinsic.Initialization) and { StaticArgs: [TypeDef or MethodDef or FieldDef] }
+                    => inst.StaticArgs.ToArray(),
+                CilIntrinsic.LoadHandle { Entity: MethodSpec { IsBoundGeneric: false } method }
+                    => [((TypeSpec)Remap(method.DeclaringType)).GetMapping(method.Definition)],
+                _ => RemapEntities(inst.StaticArgs)
+            };
             var cloned = inst.CloneWith(Remap(inst.ResultType), staticArgs, RemapArgs(inst.Args));
             var folded = _ctx._foldConstants ? ConstFolding.FoldIntrinsic(cloned) : null;
 

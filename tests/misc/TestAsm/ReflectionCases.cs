@@ -49,6 +49,30 @@ public static class ReflectionCases
         typeof(ReflectionGenericCases.Owner<int>).GetMethod("Describe")!.MakeGenericMethod(typeof(string))
     ];
 
+    public static MemberInfo[] InlinedDefinitionMetadata() => DefinitionMetadata();
+    public static MemberInfo[] InlinedGenericDefinitionMetadata() => DefinitionMetadata<int>();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static MemberInfo[] DefinitionMetadata() => [
+        typeof(Target).GetMethod(nameof(Target.Generic))!,
+        typeof(GenericTarget<>).GetMethod(nameof(GenericTarget<int>.Echo))!,
+        typeof(GenericTarget<>).GetField(nameof(GenericTarget<int>.Value))!,
+        typeof(GenericTarget<>).GetConstructor(Type.EmptyTypes)!,
+        typeof(GenericTarget<int>).GetMethod(nameof(GenericTarget<int>.Echo))!
+    ];
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static MemberInfo[] DefinitionMetadata<T>() => [
+        typeof(Target).GetMethod(nameof(Target.Generic))!,
+        typeof(GenericTarget<>).GetMethod(nameof(GenericTarget<int>.Echo))!,
+        typeof(GenericTarget<>).GetField(nameof(GenericTarget<int>.Value))!,
+        typeof(GenericTarget<>).GetConstructor(Type.EmptyTypes)!,
+        typeof(GenericTarget<T>).GetMethod(nameof(GenericTarget<int>.Echo))!,
+        typeof(GenericTarget<T>).GetField(nameof(GenericTarget<int>.Value))!,
+        typeof(GenericTarget<T>).GetConstructor(Type.EmptyTypes)!,
+        typeof(GenericTarget<T>).GetMethod(nameof(GenericTarget<int>.Echo))!.MakeGenericMethod(typeof(T))
+    ];
+
     public static MemberInfo[] FieldMetadata() => [
         typeof(Target).GetField(nameof(Target.Value))!,
         typeof(Target).GetField(nameof(Target.StaticValue))!,
