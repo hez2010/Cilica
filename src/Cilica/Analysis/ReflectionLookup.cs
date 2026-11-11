@@ -55,7 +55,7 @@ internal sealed partial class ReflectionLookup(ReflectionTypeFacts types, Instru
     {
         if (value is not CallInst call) return null;
         if (_resolvedTypes.TryGetValue(call, out var type)) return type;
-        type = TypeUtils.GetReflectedType(call) ?? ResolveGenericType(call) ?? ResolveByrefType(call);
+        type = TypeUtils.GetReflectedType(call) ?? ResolveTypeConstruction(call);
         if (call.Method.Name == "GetType" && type is TypeDefOrSpec nominal && !types.CanInspect(nominal)) type = null;
         _resolvedTypes.Add(call, type);
         if (type != null) _lookupFacts.Add((call, true));
@@ -96,26 +96,6 @@ internal sealed partial class ReflectionLookup(ReflectionTypeFacts types, Instru
             reflected = type;
         } else return null;
         return new(member, reflected, owner);
-    }
-
-    private TypeDesc? ResolveGenericType(CallInst call)
-    {
-        if (!call.IsVirtual || call.NumArgs != 2 || call.Method.Name != "MakeGenericType") return null;
-        if (!call.Method.DeclaringType.IsCorelibType(typeof(Type))) return null;
-        if (ResolveType(call.Args[0]) is not TypeDef { IsGeneric: true } definition) return null;
-        if (!types.CanInspect(definition)) return null;
-        if (!TryReadTypeArguments(call, definition.GenericParams, out var arguments, out var array)) return null;
-        if (!types.SatisfiesConstraints(definition.GenericParams, arguments, new GenericContext(arguments))) return null;
-
-        _lookupArrays.Add(call, array);
-        return definition.GetSpec(arguments);
-    }
-
-    private TypeDesc? ResolveByrefType(CallInst call)
-    {
-        if (call.IsStatic || call.NumArgs != 1 || call.Method.Name != "MakeByRefType" ||
-            !call.Method.DeclaringType.IsCorelibType(typeof(Type))) return null;
-        return ResolveType(call.Args[0]) is { } element and not ByrefType ? element.CreateByref() : null;
     }
 
     private Result? ResolveGenericMethod(CallInst lookup)
@@ -164,25 +144,6 @@ internal sealed partial class ReflectionLookup(ReflectionTypeFacts types, Instru
         return new(method, result.ReflectedType, method.DeclaringType);
     }
 
-    private bool TryReadTypeArguments(CallInst call, GenericParamType[] parameters, out ImmutableArray<TypeDesc> arguments, out KnownArray array)
-    {
-        arguments = default;
-        if (!KnownArray.TryRead(call.Args[1], call, parameters.Length, order, out array, types.Resolver.Import(typeof(Type)), allowNull: false)) return false;
-        return TryResolveTypes(array.Values, out arguments);
-    }
-
-    private bool TryResolveTypes(Value[] values, out ImmutableArray<TypeDesc> arguments)
-    {
-        arguments = default;
-        var result = ImmutableArray.CreateBuilder<TypeDesc>(values.Length);
-        foreach (var value in values) {
-            if (ResolveType(value) is not { } type) return false;
-            result.Add(type);
-        }
-        arguments = result.MoveToImmutable();
-        return true;
-    }
-
     public static bool IsMemberLookup(CallInst call)
         => call.Method.Name switch {
             "GetField" or "GetMethod" or "GetProperty" or "GetConstructor" => call.Method.DeclaringType.IsCorelibType(typeof(Type)),
@@ -197,13 +158,18 @@ internal sealed partial class ReflectionLookup(ReflectionTypeFacts types, Instru
            call.Method.Name == "GetFieldFromHandle" && call.Method.DeclaringType.IsCorelibType(typeof(FieldInfo));
 
     public static bool IsTypeLookup(CallInst call)
-        => call.Method.Name switch {
-            "GetTypeFromHandle" or "MakeByRefType" => call.Method.DeclaringType.IsCorelibType(typeof(Type)),
+        => IsTypeConstruction(call) || (call.Method.Name switch {
+            "GetTypeFromHandle" => call.Method.DeclaringType.IsCorelibType(typeof(Type)),
             "GetType" => call.Method.DeclaringType.IsCorelibType(typeof(object)),
             _ => false
-        };
+        });
 
-    public void ApplyFacts(bool preserveTrimmingDependencies, ICompilationLogger logger, Action<CallInst, Result> materializeMember)
+    public static bool IsTypeConstruction(CallInst call)
+        => call.Method.Name is "MakeArrayType" or "MakePointerType" or "MakeByRefType" or "MakeFunctionPointerType" or "MakeGenericType" &&
+            call.Method.DeclaringType.IsCorelibType(typeof(Type));
+
+    public void ApplyFacts(bool preserveTrimmingDependencies, ICompilationLogger logger,
+        Action<CallInst, Result> materializeMember, Action<CallInst, TypeDesc> materializeType)
     {
         // Resolve records dependencies first. Visit consumers first so their
         // removal can expose unused prerequisite lookups in the same traversal.
@@ -226,6 +192,9 @@ internal sealed partial class ReflectionLookup(ReflectionTypeFacts types, Instru
             }
             if (call.NumUses != 0 && _resolvedMembers.TryGetValue(call, out var member) && member?.Member != null) {
                 materializeMember(call, member);
+            }
+            if (call.NumUses != 0 && _resolvedTypes.TryGetValue(call, out var type) && type != null) {
+                materializeType(call, type);
             }
             if (call.NumUses != 0) continue;
             // Object.GetType still validates its receiver even if its result is known.

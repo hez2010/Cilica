@@ -2,6 +2,9 @@ namespace Cilica.Tests.Passes;
 
 using System.Reflection;
 using Cilica.AsmIO;
+using Cilica.IR;
+using Cilica.IR.Utils;
+using Cilica.Passes;
 
 partial class FoldReflectionTests
 {
@@ -25,6 +28,9 @@ partial class FoldReflectionTests
     [InlineData("MethodInvoke", 42)]
     [InlineData("MethodPointer", "hello")]
     [InlineData("ConstructedType", 42)]
+    [InlineData("ConstructedArrayDelegate", 42)]
+    [InlineData("ConstructedPointerDelegate", 42)]
+    [InlineData("ArrayConstraint", 42)]
     [InlineData("ConstructedDelegateType", 42)]
     [InlineData("MethodOnGenericOwner", "String:Object:hello")]
     [InlineData("ClosedStaticGenericReturnBuffer", "String:Object:hello:world")]
@@ -213,6 +219,20 @@ partial class FoldReflectionTests
     [InlineData("ConstructedTypeResult", false)]
     [InlineData("ConstructedTypeResult", true)]
     [InlineData("InlinedTypeResult", true)]
+    [InlineData("ArrayTypeResult", false)]
+    [InlineData("ArrayTypeResult", true)]
+    [InlineData("RankOneArrayTypeResult", false)]
+    [InlineData("MultidimensionalArrayTypeResult", true)]
+    [InlineData("MaximumRankArrayTypeResult", false)]
+    [InlineData("PointerTypeResult", false)]
+    [InlineData("PointerTypeResult", true)]
+    [InlineData("ByrefTypeResult", false)]
+    [InlineData("ByrefTypeResult", true)]
+    [InlineData("VoidPointerTypeResult", false)]
+    [InlineData("VoidByrefTypeResult", false)]
+    [InlineData("NestedTypeResult", false)]
+    [InlineData("NestedTypeResult", true)]
+    [InlineData("FunctionPointerArrayTypeResult", true)]
     public void TypeConstructionFoldsWhenTheTypeResultEscapes(string name, bool defaultPipeline)
     {
         using var test = new Case(name, "ReflectionGenericCases");
@@ -220,17 +240,149 @@ partial class FoldReflectionTests
         test.Optimize(defaultPipeline: defaultPipeline);
         AssertNoGenericReflection(test.Method);
         var actual = (Type)test.Emit().Invoke(null, null)!;
-        Assert.Equal(expected.FullName, actual.FullName);
-        Assert.Equal(typeof(int), Assert.Single(actual.GetGenericArguments()));
+        Assert.Equal(expected.ToString(), actual.ToString());
+        Assert.Equal(expected.IsSZArray, actual.IsSZArray);
+        if (expected.Assembly == typeof(object).Assembly) Assert.Same(expected, actual);
+    }
+
+    [Theory]
+    [InlineData("ConstructedTypeResult")]
+    [InlineData("ArrayTypeResult")]
+    [InlineData("PointerTypeResult")]
+    [InlineData("ByrefTypeResult")]
+    [InlineData("NestedTypeResult")]
+    public void TypeConstructionRetainsRequestedTrimmingDependencies(string name)
+    {
+        using var test = new Case(name, "ReflectionGenericCases");
+        var expected = (Type)test.Original.Invoke(null, null)!;
+        test.Optimize(preserveTrimmingDependencies: true);
+        Assert.Contains(test.Method.ILBody!.Instructions, instruction => IsTypeConstruction(instruction.Operand));
+        Assert.Equal(expected.ToString(), test.Emit().Invoke(null, null)!.ToString());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CompoundTypesKeepTheirRuntimeGenericArguments(bool defaultPipeline)
+    {
+        using var test = new Case("GenericTypeResult", "ReflectionGenericCases");
+        test.Optimize(defaultPipeline: defaultPipeline);
+        AssertNoGenericReflection(test.Method);
+        var method = test.Emit();
+        foreach (var argument in new[] { typeof(int), typeof(string), typeof(int?) }) {
+            Assert.Same(argument.MakeArrayType().MakePointerType().MakeByRefType(), method.MakeGenericMethod(argument).Invoke(null, null));
+        }
     }
 
     [Fact]
-    public void TypeConstructionRetainsRequestedTrimmingDependencies()
+    public void TypeConstructionPreservesRuntimeFailuresAndUnknownArguments()
     {
-        using var test = new Case("ConstructedTypeResult", "ReflectionGenericCases");
-        test.Optimize(preserveTrimmingDependencies: true);
-        Assert.Contains(test.Method.ILBody!.Instructions, instruction => instruction.Operand is MethodDesc { Name: "MakeGenericType" });
-        Assert.Equal(typeof(int), Assert.Single(((Type)test.Emit().Invoke(null, null)!).GetGenericArguments()));
+        using var invalid = new Case("InvalidTypeConstruction", "ReflectionGenericCases");
+        invalid.Optimize(defaultPipeline: true);
+        var method = invalid.Emit();
+        for (int scenario = 0; scenario < 11; scenario++) {
+            var expected = Assert.Throws<TargetInvocationException>(() => invalid.Original.Invoke(null, [scenario])).InnerException!.GetType();
+            Assert.Equal(expected, Assert.Throws<TargetInvocationException>(() => method.Invoke(null, [scenario])).InnerException!.GetType());
+        }
+        Assert.Equal(invalid.Original.Invoke(null, [11])!.ToString(), method.Invoke(null, [11])!.ToString());
+
+        using var ranked = new Case("RuntimeRankArrayType", "ReflectionGenericCases");
+        ranked.Optimize(defaultPipeline: true);
+        Assert.Contains(ranked.Method.ILBody!.Instructions, instruction => IsTypeConstruction(instruction.Operand));
+        var makeArray = ranked.Emit().CreateDelegate<Func<int, Type>>();
+        Assert.Same(typeof(int).MakeArrayType(1), makeArray(1));
+        Assert.Same(typeof(int[,]), makeArray(2));
+        Assert.Throws<IndexOutOfRangeException>(() => makeArray(0));
+
+        using var generic = new Case("MaybeByRefLikeArray", "ReflectionGenericCases");
+        generic.Optimize(defaultPipeline: true);
+        Assert.Contains(generic.Method.ILBody!.Instructions, instruction => IsTypeConstruction(instruction.Operand));
+        var genericArray = generic.Emit();
+        Assert.Same(typeof(int[]), genericArray.MakeGenericMethod(typeof(int)).Invoke(null, null));
+        Assert.IsType<TypeLoadException>(Assert.Throws<TargetInvocationException>(() => genericArray.MakeGenericMethod(typeof(Span<int>)).Invoke(null, null)).InnerException);
+    }
+
+    [FunctionPointerTypeTheory]
+    [InlineData("Plain", false, false)]
+    [InlineData("Plain", true, false)]
+    [InlineData("Plain", false, true)]
+    [InlineData("Plain", true, true)]
+    [InlineData("NullParameters", false, false)]
+    [InlineData("NullParameters", true, false)]
+    [InlineData("Byref", false, false)]
+    [InlineData("Nested", true, false)]
+    [InlineData("NestedResult", false, false)]
+    [InlineData("SpecialTypes", false, false)]
+    [InlineData("SpecialTypes", true, false)]
+    [InlineData("NullParameter", false, false)]
+    [InlineData("VoidParameter", false, false)]
+    [InlineData("OpenParameter", false, false)]
+    [InlineData("OpenResult", false, false)]
+    [InlineData("RuntimeFlag", false, false)]
+    [InlineData("RuntimeFlag", true, false)]
+    [InlineData("Nonvirtual", false, false)]
+    public void FunctionPointerTypeConstructionPreservesSignaturesAndValidation(string scenario, bool unmanaged, bool preserveTrimming)
+    {
+        using var resolver = new ModuleResolver();
+        resolver.AddTrustedSearchPaths();
+        var typeType = resolver.Import(typeof(Type));
+        var body = Utils.CreateTestMethod(resolver, typeType, PrimType.Bool);
+        var builder = new IRBuilder(body.CreateBlock());
+        TypeDesc resultType = scenario switch {
+            "Byref" => PrimType.Int32.CreateByref(),
+            "NestedResult" => new FuncPtrType(new MethodSig(PrimType.Int32, [PrimType.String], false)),
+            "SpecialTypes" => PrimType.Void.CreateByref(),
+            "OpenResult" => resolver.Import(typeof(List<>)),
+            "NullParameters" => PrimType.Void,
+            _ => PrimType.Int32
+        };
+        TypeDesc?[] parameterTypes = scenario switch {
+            "NullParameters" => [],
+            "NullParameter" => [null],
+            "VoidParameter" => [PrimType.Void],
+            "OpenParameter" => [resolver.Import(typeof(List<>))],
+            "Byref" => [PrimType.Int32.CreatePointer(), resolver.Import(typeof(Span<int>))],
+            "Nested" => [new FuncPtrType(new MethodSig(PrimType.Void, [PrimType.Int32], false)), new MDArrayType(PrimType.Int32, 2, [], [])],
+            "SpecialTypes" => [PrimType.TypedRef, resolver.Import(typeof(ArgIterator)), resolver.Import(typeof(RuntimeArgumentHandle)), PrimType.Void.CreateByref()],
+            _ => [PrimType.String, PrimType.Int32.CreateByref()]
+        };
+        Value parameters = ConstNull.Create();
+        if (scenario != "NullParameters") {
+            parameters = builder.CreateNewArray(typeType, ConstInt.CreateI(parameterTypes.Length));
+            for (int i = 0; i < parameterTypes.Length; i++) {
+                builder.CreateArrayStore(parameters, ConstInt.CreateI(i), parameterTypes[i] is { } parameter ? ReflectType(builder, parameter) : ConstNull.Create());
+            }
+        }
+        var factory = typeType.FindMethod("MakeFunctionPointerType", new MethodSig(typeType, [typeType.CreateArray(), PrimType.Bool], true));
+        var call = builder.CreateCallVirt(factory, ReflectType(builder, resultType), parameters,
+            scenario == "RuntimeFlag" ? body.Args[0] : ConstInt.CreateI(unmanaged ? 1 : 0));
+        if (scenario == "Nonvirtual") call.IsVirtual = false;
+        builder.CreateReturn(call);
+
+        var original = Utils.Compile<Func<bool, Type>>(body);
+        Type? expected = null;
+        var error = Record.Exception(() => expected = original(unmanaged));
+        var compilation = new Compilation(body.Definition.Module, new VoidLogger(), new() {
+            VerifyEachPass = true, PreserveTrimmingDependencies = preserveTrimming
+        });
+        Assert.True(CompilationPipeline.CreateDefault(compilation).Run([body.Definition]).Succeeded);
+        var optimized = Utils.Compile<Func<bool, Type>>(body.Definition.Body!);
+        if (error != null) Assert.IsType(error.GetType(), Record.Exception(() => optimized(unmanaged)));
+        else Assert.Same(expected, optimized(unmanaged));
+        bool retained = error != null || preserveTrimming || scenario == "RuntimeFlag";
+        Assert.Equal(retained, body.Definition.Body!.Instructions().OfType<CallInst>().Any(instruction => IsTypeConstruction(instruction.Method)));
+    }
+
+    private static Value ReflectType(IRBuilder builder, TypeDesc type)
+        => builder.CreateCall(builder.Resolver.Import(typeof(Type)).FindMethod("GetTypeFromHandle"),
+            builder.Emit(new CilIntrinsic.LoadHandle(builder.Resolver, type)));
+
+    private sealed class FunctionPointerTypeTheoryAttribute : TheoryAttribute
+    {
+        public FunctionPointerTypeTheoryAttribute()
+        {
+            if (typeof(Type).GetMethod("MakeFunctionPointerType") == null) Skip = "Requires Type.MakeFunctionPointerType (.NET 11 or later).";
+        }
     }
 
     [Theory]
@@ -243,6 +395,9 @@ partial class FoldReflectionTests
     [InlineData("AlreadyConstructed")]
     [InlineData("OpenGenericVirtualDelegate")]
     [InlineData("ChangedTypeArguments")]
+    [InlineData("OpenArrayTypeResult")]
+    [InlineData("OpenPointerTypeResult")]
+    [InlineData("OpenByrefTypeResult")]
     public void UnprovenGenericConstructionsRetainRuntimeBehavior(string name)
     {
         using var test = new Case(name, "ReflectionGenericCases");
@@ -286,6 +441,9 @@ partial class FoldReflectionTests
     [Theory]
     [InlineData("MethodDelegate", "MakeGenericMethod")]
     [InlineData("ConstructedType", "MakeGenericType")]
+    [InlineData("ArrayTypeResult", "MakeArrayType")]
+    [InlineData("PointerTypeResult", "MakePointerType")]
+    [InlineData("ByrefTypeResult", "MakeByRefType")]
     public void NonvirtualReflectionBaseCallsRetainTheirImplementation(string name, string operation)
     {
         using var test = new Case(name, "ReflectionGenericCases");
@@ -321,8 +479,12 @@ partial class FoldReflectionTests
     }
 
     private static bool IsGenericReflection(object? operand)
-        => IsReflectionAccess(operand) || IsReflectionFactory(operand) || operand is MethodDesc method &&
-            method.Name is "MakeGenericMethod" or "MakeGenericType" && method.DeclaringType.Namespace is "System" or "System.Reflection";
+        => IsReflectionAccess(operand) || IsReflectionFactory(operand) || IsTypeConstruction(operand) ||
+            operand is MethodDesc { Name: "MakeGenericMethod" } method && method.DeclaringType.IsCorelibType(typeof(MethodInfo));
+
+    private static bool IsTypeConstruction(object? operand)
+        => operand is MethodDesc { Name: "MakeArrayType" or "MakePointerType" or "MakeByRefType" or "MakeFunctionPointerType" or "MakeGenericType" } method &&
+            method.DeclaringType.IsCorelibType(typeof(Type));
 
     private static void AssertNoGenericReflection(MethodDef method)
         => Assert.DoesNotContain(method.ILBody!.Instructions, instruction => IsGenericReflection(instruction.Operand));

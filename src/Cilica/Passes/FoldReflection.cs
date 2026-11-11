@@ -49,7 +49,7 @@ internal sealed partial class ReflectionRewriter
             FoldCall(call);
         }
 
-        _lookups.ApplyFacts(_ctx.Compilation.Settings.PreserveTrimmingDependencies, _ctx.Logger, FoldMemberConstruction);
+        _lookups.ApplyFacts(_ctx.Compilation.Settings.PreserveTrimmingDependencies, _ctx.Logger, FoldMemberConstruction, FoldTypeConstruction);
         if (_ctx.Method.Revision == revision) return MethodInvalidations.None;
         return _ctx.Method.ControlFlowRevision == controlFlowRevision
             ? MethodInvalidations.DataFlow : MethodInvalidations.ExceptionRegions;
@@ -57,10 +57,6 @@ internal sealed partial class ReflectionRewriter
 
     private void FoldCall(CallInst call)
     {
-        if (call.Method.Name == "MakeGenericType" && _lookups.ResolveType(call) is { } constructedType) {
-            FoldTypeConstruction(call, constructedType);
-            return;
-        }
         if (ReflectionLookup.IsMemberLookup(call)) {
             _lookups.Resolve(call);
             return;
@@ -98,13 +94,16 @@ internal sealed partial class ReflectionRewriter
 
     private void FoldTypeConstruction(CallInst call, TypeDesc type)
     {
-        if (_ctx.Compilation.Settings.PreserveTrimmingDependencies || !_access.CanUseType(type)) return;
+        if (!ReflectionLookup.IsTypeConstruction(call) || !_access.CanUseType(type)) return;
+        // Constituents such as List<> carry the definition's own variables,
+        // which cannot be expressed in the caller's ldtoken generic context.
+        if (!ReflectionTypeFacts.IsRuntimeType(type)) return;
 
         var original = _ctx.Logger.IsEnabled(LogLevel.Trace) ? call.ToString() : null;
         var builder = BuilderBefore(call);
         var replacement = CreateTypeReference(builder, type);
+        replacement.ResultIsNonNull = true;
         call.ReplaceUses(replacement);
-        _lookups.ResolveType(replacement);
         _ctx.Logger.Trace($"Folded reflection type construction '{original}' in '{call.Block}' to '{type}'.");
     }
 

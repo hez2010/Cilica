@@ -97,7 +97,7 @@ internal sealed class ReflectionTypeFacts(MethodDef caller, bool allowCrossAssem
         for (int i = 0; i < parameters.Count; i++) {
             var parameter = parameters[i];
             var argument = arguments[i];
-            if (!IsRuntimeType(argument) || argument is PointerType or FuncPtrType || !CanInspectArgument(argument)) return false;
+            if (!IsRuntimeType(argument) || argument is ByrefType or PointerType or FuncPtrType || !CanInspectArgument(argument)) return false;
             if (argument.Kind is TypeKind.Void or TypeKind.TypedRef) return false;
             if (!SatisfiesSpecialConstraints(parameter, argument)) return false;
 

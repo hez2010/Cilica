@@ -30,7 +30,51 @@ public static unsafe class ReflectionGenericCases
     public static object ConstructedType()
         => typeof(Owner<>).MakeGenericType(typeof(int)).GetMethod(nameof(Owner<int>.Echo))!.CreateDelegate<Func<int, int>>()(42);
 
+    public static object ConstructedArrayDelegate()
+        => typeof(Owner<>).MakeGenericType(typeof(int).MakeArrayType()).GetMethod(nameof(Owner<int[]>.Echo))!.CreateDelegate<Func<int[], int[]>>()([42])[0];
+
+    public static object ArrayConstraint()
+        => typeof(Target).GetMethod(nameof(Target.First))!.MakeGenericMethod(typeof(int).MakeArrayType()).CreateDelegate<Func<int[], int>>()([42]);
+
+    public delegate int PointerReader(int* value);
+    public static object ConstructedPointerDelegate()
+    {
+        int value = 42;
+        return typeof(Target).GetMethod(nameof(Target.ReadPointer), [typeof(int).MakePointerType()])!.CreateDelegate<PointerReader>()(&value);
+    }
+
     public static Type ConstructedTypeResult() => typeof(Owner<>).MakeGenericType(typeof(int));
+    public static Type ArrayTypeResult() => typeof(int).MakeArrayType();
+    public static Type RankOneArrayTypeResult() => typeof(int).MakeArrayType(1);
+    public static Type MultidimensionalArrayTypeResult() => typeof(string).MakeArrayType(3);
+    public static Type MaximumRankArrayTypeResult() => typeof(int).MakeArrayType(32);
+    public static Type PointerTypeResult() => typeof(string).MakePointerType();
+    public static Type ByrefTypeResult() => typeof(int).MakeByRefType();
+    public static Type VoidPointerTypeResult() => typeof(void).MakePointerType();
+    public static Type VoidByrefTypeResult() => typeof(void).MakeByRefType();
+    public static Type OpenArrayTypeResult() => typeof(List<>).MakeArrayType();
+    public static Type OpenPointerTypeResult() => typeof(List<>).MakePointerType();
+    public static Type OpenByrefTypeResult() => typeof(List<>).MakeByRefType();
+    public static Type NestedTypeResult() => typeof(Owner<>).MakeGenericType(typeof(int).MakeArrayType()).MakeArrayType(2).MakePointerType().MakeByRefType();
+    public static Type FunctionPointerArrayTypeResult() => typeof(delegate*<int, void>).MakeArrayType();
+    public static Type GenericTypeResult<T>() => typeof(T).MakeArrayType().MakePointerType().MakeByRefType();
+    public static Type RuntimeRankArrayType(int rank) => typeof(int).MakeArrayType(rank);
+    public static Type MaybeByRefLikeArray<T>() where T : allows ref struct => typeof(T).MakeArrayType();
+
+    public static Type InvalidTypeConstruction(int scenario) => scenario switch {
+        0 => typeof(int).MakeArrayType(0),
+        1 => typeof(int).MakeArrayType(33),
+        2 => typeof(void).MakeArrayType(),
+        3 => typeof(int).MakeByRefType().MakeArrayType(),
+        4 => typeof(int).MakeByRefType().MakePointerType(),
+        5 => typeof(int).MakeByRefType().MakeByRefType(),
+        6 => typeof(Span<int>).MakeArrayType(),
+        7 => typeof(TypedReference).MakeArrayType(),
+        8 => typeof(RuntimeArgumentHandle).MakeArrayType(),
+        9 => typeof(Owner<>).MakeGenericType(typeof(int).MakeByRefType()),
+        10 => typeof(Owner<>).MakeGenericType(typeof(void).MakePointerType()),
+        _ => typeof(Owner<>).MakeGenericType(typeof(List<>))
+    };
     public static Type InlinedTypeResult() => Definition().MakeGenericType(Arguments());
 
     public static object ConstructedDelegateType()
@@ -328,6 +372,8 @@ public static unsafe class ReflectionGenericCases
 
     public static class Target
     {
+        public static int ReadPointer(int* value) => *value;
+        public static int First<T>(T values) where T : IEnumerable<int> => values.First();
         public static int GenericChoice<T>(int value) => value;
 
         public static int GenericChoice(int value) => -value;

@@ -127,17 +127,6 @@ partial class ReflectionLookup
         return true;
     }
 
-    private bool TryReadParameterTypes(Value value, CallInst consumer, out ImmutableArray<TypeDesc> parameters, out KnownArray array)
-    {
-        parameters = default;
-        array = null!;
-        // CLI parameter sequences cannot describe a method with more parameters.
-        // Retain validation of larger runtime arrays without materializing them.
-        int count = value is CilIntrinsic.NewArray { Args: [ConstInt { Value: >= 0 and <= ushort.MaxValue } length] } ? (int)length.Value : 0;
-        if (!KnownArray.TryRead(value, consumer, count, order, out array, types.Resolver.Import(typeof(Type)), allowNull: false)) return false;
-        return TryResolveTypes(array.Values, out parameters);
-    }
-
     private Result? SelectMember(TypeDefOrSpec type, MemberQuery query)
     {
         var candidates = CollectCandidates(type, query);
