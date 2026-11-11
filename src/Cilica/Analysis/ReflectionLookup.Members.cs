@@ -67,11 +67,12 @@ partial class ReflectionLookup
 
     private Result? ResolveNamedMember(CallInst lookup)
     {
-        if (lookup.IsStatic || lookup.Args[1] is not ConstString) return null;
+        if (lookup.IsStatic || lookup.Method.Name != "GetConstructor" && lookup.Args[1] is not ConstString) return null;
         if (ResolveType(lookup.Args[0]) is not TypeDefOrSpec type || !types.CanInspect(type) || type.Attribs.HasFlag(TypeAttributes.Import)) return null;
         if (!TryReadMemberQuery(lookup, out var query, out var array)) return null;
-        if (!query.Flags.HasFlag(BindingFlags.DeclaredOnly) && !types.CanInspectHierarchy(type)) return null;
-        if (type is TypeDef { IsGeneric: true } && query.HasSignature) return null;
+        if (query.Kind != MemberTypes.Constructor && !query.Flags.HasFlag(BindingFlags.DeclaredOnly) && !types.CanInspectHierarchy(type)) return null;
+        if (type is TypeDef { IsGeneric: true } && query.HasSignature &&
+            !(query.HasParameterTypes && query.ParameterTypes.IsEmpty && query.PropertyType == null)) return null;
 
         var cache = Index(type).Selections;
         if (!cache.TryGetValue(query, out var result)) {
@@ -90,14 +91,16 @@ partial class ReflectionLookup
             "GetField" => MemberTypes.Field,
             "GetMethod" => MemberTypes.Method,
             "GetProperty" => MemberTypes.Property,
+            "GetConstructor" => MemberTypes.Constructor,
             _ => throw new UnreachableException()
         };
-        var flags = BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static;
+        var flags = BindingFlags.Public | BindingFlags.Instance;
+        if (kind != MemberTypes.Constructor) flags |= BindingFlags.Static;
         TypeDesc? propertyType = null;
         ImmutableArray<TypeDesc> parameters = default;
         int? genericArity = null;
 
-        for (int i = 2; i < lookup.NumArgs; i++) {
+        for (int i = kind == MemberTypes.Constructor ? 1 : 2; i < lookup.NumArgs; i++) {
             var parameter = lookup.Method.ParamSig[i].Type;
             var value = lookup.Args[i];
             if (parameter.IsCorelibType(typeof(BindingFlags))) {
@@ -120,7 +123,7 @@ partial class ReflectionLookup
             } else return false;
         }
 
-        query = new(kind, ((ConstString)lookup.Args[1]).Value, flags, parameters, propertyType, genericArity);
+        query = new(kind, kind == MemberTypes.Constructor ? ".ctor" : ((ConstString)lookup.Args[1]).Value, flags, parameters, propertyType, genericArity);
         return true;
     }
 
@@ -227,7 +230,7 @@ partial class ReflectionLookup
 
     private bool IsCompatibleMethod(MemberQuery query, MemberCandidate candidate)
     {
-        if (query.Kind != MemberTypes.Method || query.Flags.HasFlag(BindingFlags.ExactBinding) || candidate.HasMethodVariables) return false;
+        if (query.Kind is not (MemberTypes.Method or MemberTypes.Constructor) || query.Flags.HasFlag(BindingFlags.ExactBinding) || candidate.HasMethodVariables) return false;
         for (int i = 0; i < candidate.ParameterCount; i++) {
             var source = query.ParameterTypes[i];
             var target = candidate.ParameterTypes[i];
@@ -249,7 +252,7 @@ partial class ReflectionLookup
 
     private IEnumerable<TypeDefOrSpec> CandidateOwners(TypeDefOrSpec type, MemberQuery query)
     {
-        if (query.Flags.HasFlag(BindingFlags.DeclaredOnly)) return [type];
+        if (query.Kind == MemberTypes.Constructor || query.Flags.HasFlag(BindingFlags.DeclaredOnly)) return [type];
         if (query.Kind != MemberTypes.Field || !query.Flags.HasFlag(BindingFlags.FlattenHierarchy)) return Hierarchy(type);
         var index = Index(type);
         if (index.FieldOwners == null) {
@@ -277,10 +280,12 @@ partial class ReflectionLookup
             IEnumerable<MemberDesc> members = query.Kind switch {
                 MemberTypes.Field => type.Fields,
                 MemberTypes.Method => type.Methods.Where(method => !method.IsConstructor && !method.IsStaticConstructor),
+                MemberTypes.Constructor => type.Methods.Where(method => method.IsConstructor || method.IsStaticConstructor),
                 MemberTypes.Property => type.Definition.Properties,
                 _ => throw new UnreachableException()
             };
-            names = members.ToLookup(member => member.Name, ignoreCase ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            names = members.ToLookup(member => query.Kind == MemberTypes.Constructor ? ".ctor" : member.Name,
+                ignoreCase ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
             cache.Add(key, names);
         }
         return names[query.Name];

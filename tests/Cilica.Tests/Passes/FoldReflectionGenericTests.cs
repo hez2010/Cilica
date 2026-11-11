@@ -6,6 +6,21 @@ using Cilica.AsmIO;
 partial class FoldReflectionTests
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void EscapingMemberMetadataKeepsRuntimeTypeArguments(bool defaultPipeline)
+    {
+        using var test = new Case("GenericMetadata", "ReflectionGenericCases");
+        test.Optimize(defaultPipeline: defaultPipeline);
+        Assert.DoesNotContain(test.Method.ILBody!.Instructions, instruction => IsMemberDiscovery(instruction.Operand));
+        var method = test.Emit();
+        foreach (var type in new[] { typeof(int), typeof(string), typeof(int?) }) {
+            AssertMetadata((MemberInfo[])test.Original.MakeGenericMethod(type).Invoke(null, null)!,
+                (MemberInfo[])method.MakeGenericMethod(type).Invoke(null, null)!);
+        }
+    }
+
+    [Theory]
     [InlineData("MethodDelegate", 42)]
     [InlineData("MethodInvoke", 42)]
     [InlineData("MethodPointer", "hello")]

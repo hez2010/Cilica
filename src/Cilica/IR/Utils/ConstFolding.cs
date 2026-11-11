@@ -257,6 +257,7 @@ public class ConstFolding
             ConstInt c => c.Value != 0,
             ConstNull => false,
             CallInst { ResultIsNonNull: true } => true,
+            CilIntrinsic.RefCast { ResultType.StackType: StackType.Object } cast => FoldCondition(cast.Args[0]),
             CilIntrinsic.Box { SourceType: { IsValueType: true, Name: not "Nullable`1" } } => true, // either throws or returns non-null 
             NewObjInst => true,
             _ => null,
@@ -282,7 +283,7 @@ public class ConstFolding
             if (method.Name is "op_Equality" or "op_Inequality" && args.Length == 2 &&
                 (args[0] is ConstNull || args[1] is ConstNull) &&
                 (declType.Namespace, declType.Name) is ("System", "Type") or
-                    ("System.Reflection", "MemberInfo" or "MethodBase" or "MethodInfo" or "FieldInfo" or "PropertyInfo") &&
+                    ("System.Reflection", "MemberInfo" or "MethodBase" or "MethodInfo" or "ConstructorInfo" or "FieldInfo" or "PropertyInfo") &&
                 new MethodSig(PrimType.Bool, [declType, declType], false).Matches(method)) {
                 // Metadata equality operators test null before invoking virtual Equals.
                 var other = args[0] is ConstNull ? args[1] : args[0];

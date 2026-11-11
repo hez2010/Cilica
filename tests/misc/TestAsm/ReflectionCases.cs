@@ -7,12 +7,14 @@ public static class ReflectionCases
     public static bool KnownMethodExists() => typeof(Target).GetMethod(nameof(Target.Constant)) is not null;
     public static bool KnownFieldExists() => typeof(Target).GetField(nameof(Target.Value)) is not null;
     public static bool KnownPropertyExists() => typeof(Target).GetProperty(nameof(Target.Property)) is not null;
+    public static bool KnownConstructorExists() => typeof(Target).GetConstructor(Type.EmptyTypes) is not null;
     public static bool KnownGenericMethodExists() => typeof(Target).GetMethod(nameof(Target.Generic))!.MakeGenericMethod(typeof(int)) is not null;
     public static bool KnownGenericTypeExists() => typeof(GenericTarget<>).MakeGenericType(typeof(int)) is not null;
     public static bool KnownMethodOperatorNullCheck() => typeof(Target).GetMethod(nameof(Target.Constant)) != null;
     public static bool MissingMethodOperatorNullCheck() => typeof(Target).GetMethod("Absent") == null;
     public static bool KnownFieldOperatorNullCheck() => typeof(Target).GetField(nameof(Target.Value)) != null;
     public static bool KnownPropertyOperatorNullCheck() => typeof(Target).GetProperty(nameof(Target.Property)) != null;
+    public static bool KnownConstructorOperatorNullCheck() => typeof(Target).GetConstructor(Type.EmptyTypes) != null;
     public static bool KnownTypeOperatorNullCheck() => typeof(GenericTarget<>).MakeGenericType(typeof(int)) != null;
     public static bool KnownMemberOperatorNullCheck() => (MemberInfo?)typeof(Target).GetMethod(nameof(Target.Constant)) != null;
     public static bool KnownMethodBaseOperatorNullCheck() => (MethodBase?)typeof(Target).GetMethod(nameof(Target.Constant)) != null;
@@ -20,6 +22,7 @@ public static class ReflectionCases
     public static bool MissingMethodIsNull() => typeof(Target).GetMethod("Absent") is null;
     public static bool MissingFieldIsNull() => typeof(Target).GetField("Absent") is null;
     public static bool MissingPropertyIsNull() => typeof(Target).GetProperty("Absent") is null;
+    public static bool MissingConstructorIsNull() => typeof(Target).GetConstructor([typeof(int), typeof(int), typeof(int)]) is null;
     public static bool ExcludedFieldIsNull() => typeof(Target).GetField("Secret", BindingFlags.Instance | BindingFlags.Public) is null;
     public static bool MissingAccessorIsNull() => typeof(ReflectionAccessorCases.Target).GetProperty("WriteOnly")!.GetMethod is null;
     public static bool ExcludedAccessorIsNull() => typeof(ReflectionAccessorCases.Target).GetProperty("PrivateSet")!.GetSetMethod(false) is null;
@@ -29,6 +32,142 @@ public static class ReflectionCases
     {
         var method = typeof(Target).GetMethod(nameof(Target.Constant));
         return method is null ? "missing" : method.Name;
+    }
+
+    public static MemberInfo[] MethodMetadata() => [
+        typeof(Target).GetMethod(nameof(Target.Constant))!,
+        typeof(Target).GetMethod(nameof(Target.Add))!,
+        typeof(Target).GetMethod(nameof(Target.Overload), [typeof(int)])!,
+        typeof(Target).GetMethod(nameof(Target.Generic))!,
+        typeof(Target).GetMethod(nameof(Target.Generic))!.MakeGenericMethod(typeof(int)),
+        typeof(FailedInitialization).GetMethod(nameof(FailedInitialization.Read))!,
+        typeof(ReflectionGenericCases.Abstract).GetMethod("Read")!,
+        typeof(ReflectionGenericCases.IValue).GetMethod("Read")!,
+        typeof(ReflectionGenericCases.Owner<int>).GetMethod("Echo")!,
+        typeof(ReflectionGenericCases.Owner<>).GetMethod("Echo")!,
+        typeof(ReflectionGenericCases.Owner<int>).GetMethod("Describe")!.MakeGenericMethod(typeof(string))
+    ];
+
+    public static MemberInfo[] FieldMetadata() => [
+        typeof(Target).GetField(nameof(Target.Value))!,
+        typeof(Target).GetField(nameof(Target.StaticValue))!,
+        typeof(Target).GetField(nameof(Target.Readonly))!,
+        typeof(Target).GetField("secret", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.IgnoreCase)!,
+        typeof(GenericTarget<int>).GetField(nameof(GenericTarget<int>.Value))!,
+        typeof(GenericTarget<string>).GetField(nameof(GenericTarget<string>.StaticValue))!,
+        typeof(GenericTarget<>).GetField(nameof(GenericTarget<int>.Value))!,
+        typeof(FailedInitialization).GetField(nameof(FailedInitialization.Value))!,
+        typeof(FailedValue).GetField(nameof(FailedValue.Value))!
+    ];
+
+    public static MemberInfo[] ConstructorMetadata() => [
+        typeof(Target).GetConstructor(Type.EmptyTypes)!,
+        typeof(GenericTarget<int>).GetConstructor(Type.EmptyTypes)!,
+        typeof(GenericTarget<>).GetConstructor(Type.EmptyTypes)!,
+        typeof(ReflectionAccessorCases.GenericTarget<int>).GetConstructor([typeof(int)])!,
+        typeof(ReflectionAccessorCases.GenericTarget<int>).GetConstructor(BindingFlags.Public | BindingFlags.Instance, null,
+            CallingConventions.Standard, [typeof(byte)], null)!,
+        typeof(FailedInitialization).GetConstructor(BindingFlags.NonPublic | BindingFlags.Static, null, Type.EmptyTypes, null)!,
+        typeof(string).GetConstructor([typeof(char), typeof(int)])!
+    ];
+
+    public static MemberInfo[] AccessorMetadata() => [
+        typeof(Target).GetProperty(nameof(Target.Property))!.GetMethod!,
+        typeof(Target).GetProperty(nameof(Target.Property))!.SetMethod!,
+        typeof(Target).GetProperty("Item")!.GetGetMethod()!,
+        typeof(GenericTarget<int>).GetProperty(nameof(GenericTarget<int>.Property))!.GetMethod!,
+        typeof(GenericTarget<>).GetProperty(nameof(GenericTarget<int>.Property))!.GetMethod!,
+        typeof(GenericTarget<int>).GetProperty(nameof(GenericTarget<int>.PrivateSetter))!.GetSetMethod(true)!
+    ];
+
+    public static MemberInfo[] InheritedMethodMetadata() => [
+        typeof(Target).GetMethod(nameof(Target.Read))!,
+        typeof(GenericDerived).GetProperty(nameof(GenericDerived.Property))!.GetMethod!,
+        typeof(GenericDerived).GetMethod(nameof(GenericDerived.Echo))!,
+        typeof(GenericDerived).GetMethod(nameof(GenericDerived.Echo))!.MakeGenericMethod(typeof(string)),
+        typeof(LookupDerived).GetMethod("set_PrivateGet")!
+    ];
+
+    public static MemberInfo[] MetadataWithoutHandles() => [
+        typeof(Target).GetProperty(nameof(Target.Property))!,
+        typeof(Target).GetField(nameof(Target.EnumConstant))!,
+        typeof(Target).GetField(nameof(Target.StringConstant))!,
+        typeof(Target).GetField(nameof(Target.Inherited))!,
+        typeof(GenericDerived).GetField(nameof(GenericDerived.Value))!
+    ];
+
+    public static object? InvokeWithRuntimeArguments(object?[] arguments)
+        => typeof(Target).GetMethod(nameof(Target.Echo))!.Invoke(null, arguments);
+
+    public static FieldInfo MetadataThroughNullableReceiver(Target? target) => target!.GetType().GetField(nameof(Target.Value))!;
+
+    public static object ParameterlessConstructor()
+        => ((Target)typeof(Target).GetConstructor(Type.EmptyTypes)!.Invoke(null)).Value;
+
+    public static object ConstructorArguments()
+        => ((Target)typeof(Target).GetConstructor([typeof(int)])!.Invoke([(byte)42])).Value;
+
+    public static object GenericConstructor()
+        => ((ReflectionAccessorCases.GenericTarget<int>)typeof(ReflectionAccessorCases.GenericTarget<int>).GetConstructor([typeof(int)])!.Invoke([42])).Value;
+
+    public static object StructConstructor()
+        => ((Counter)typeof(Counter).GetConstructor([typeof(int)])!.Invoke([42])).Value;
+
+    public static object NullableConstructor()
+        => typeof(int?).GetConstructor([typeof(int)])!.Invoke([42]);
+
+    public static bool ConstructorCopyBack()
+    {
+        var constructor = typeof(Target).GetConstructor([typeof(int).MakeByRefType(), typeof(string).MakeByRefType()])!;
+        object?[] arguments = [1, null];
+        var created = (Target)constructor.Invoke(arguments);
+        return created.Value == 42 && (int)arguments[0]! == 42 && (string)arguments[1]! == "updated";
+    }
+
+    public static object ConstructorException()
+    {
+        try { return typeof(Target).GetConstructor([typeof(int)])!.Invoke([-1]); }
+        catch (TargetInvocationException error) { return error.InnerException!.GetType().Name; }
+    }
+
+    public static object UnwrappedConstructorException()
+    {
+        try { return typeof(Target).GetConstructor([typeof(int)])!.Invoke(BindingFlags.DoNotWrapExceptions, null, [-1], null); }
+        catch (InvalidOperationException error) { return error.Message; }
+    }
+
+    public static object ConstructorInitialization()
+    {
+        try { return typeof(FailedInitialization).GetConstructor(Type.EmptyTypes)!.Invoke(null); }
+        catch (TargetInvocationException error) { return error.InnerException!.GetType().Name; }
+    }
+
+    public static object ExistingConstructorReceiver()
+    {
+        var target = new Target();
+        typeof(Target).GetConstructor([typeof(int)])!.Invoke(target, [42]);
+        return target.Value;
+    }
+
+    public static object StaticConstructorInvocation()
+    {
+        LookupEffects = 0;
+        var constructor = typeof(InitializedValue).GetConstructor(BindingFlags.NonPublic | BindingFlags.Static, null, Type.EmptyTypes, null)!;
+        constructor.Invoke(null, null);
+        constructor.Invoke(null, null);
+        return LookupEffects;
+    }
+
+    public static object AbstractConstructor()
+    {
+        try { return typeof(ReflectionGenericCases.Abstract).GetConstructor(BindingFlags.NonPublic | BindingFlags.Instance, null, Type.EmptyTypes, null)!.Invoke(null); }
+        catch (MemberAccessException error) { return error.GetType().Name; }
+    }
+
+    public static object InvalidConstructorArguments()
+    {
+        try { return typeof(Target).GetConstructor([typeof(int)])!.Invoke(["invalid"]); }
+        catch (ArgumentException error) { return error.GetType().Name; }
     }
 
     public static int LookupChoice(bool chooseField)
@@ -707,6 +846,18 @@ public static class ReflectionCases
 
     public sealed class Target : Base
     {
+        public Target() { }
+        public Target(int value)
+        {
+            if (value < 0) throw new InvalidOperationException("constructor failure");
+            Value = value;
+        }
+        public Target(ref int value, out string text)
+        {
+            Value = value = 42;
+            text = "updated";
+        }
+
         public int Value = 7;
         public long WideValue;
         public double RealValue;
@@ -757,12 +908,14 @@ public static class ReflectionCases
 
     public struct Counter
     {
+        public Counter(int value) => Value = value;
         public int Value;
         public void Increment() => Value++;
     }
 
     public class GenericTarget<T>
     {
+        public U Echo<U>(U value) => value;
         public T? Value;
         public T? Property { get; set; }
         public T? PrivateSetter { get; private set; }

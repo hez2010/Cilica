@@ -61,6 +61,9 @@ internal sealed record KnownArray(Value[] Values, Instruction? Allocation, Instr
     private static bool IsEmpty(Value value, TypeDesc elementType, bool allowNull)
     {
         if (value is ConstNull) return allowNull;
+        if (elementType.IsCorelibType(typeof(Type)) && value is LoadInst {
+            Address: FieldAddrInst { Field: { IsStatic: true, Name: "EmptyTypes", DeclaringType: var owner } }
+        } && owner.IsCorelibType(typeof(Type))) return true;
         return value is CallInst { Method.Name: "Empty", NumArgs: 0 } call &&
             call.Method.DeclaringType.IsCorelibType(typeof(Array)) &&
             call.Method.GenericParams is [var element] && element == elementType;

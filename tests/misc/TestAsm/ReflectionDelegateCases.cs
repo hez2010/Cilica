@@ -7,6 +7,19 @@ public static unsafe class ReflectionDelegateCases
     public static object GenericStatic()
         => typeof(Target).GetMethod(nameof(Target.Add))!.CreateDelegate<Func<int, int>>()(41);
 
+    public static object ConstructorDelegate()
+    {
+        var pointer = typeof(Target).GetMethod(nameof(Target.Add))!.MethodHandle.GetFunctionPointer();
+        var callback = (Func<int, int>)typeof(Func<int, int>).GetConstructor([typeof(object), typeof(IntPtr)])!.Invoke([null, pointer]);
+        return callback(41);
+    }
+
+    public static object ConstructedReceiverDelegate()
+    {
+        var target = typeof(Target).GetConstructor(Type.EmptyTypes)!.Invoke(null);
+        return typeof(Target).GetMethod(nameof(Target.AddInstance))!.CreateDelegate<Func<int, int>>(target)(2);
+    }
+
     public static object UntypedStatic()
         => ((Func<int, int>)typeof(Target).GetMethod(nameof(Target.Add))!.CreateDelegate(typeof(Func<int, int>)))(41);
 
@@ -251,6 +264,15 @@ public static unsafe class ReflectionDelegateCases
     {
         Result = 0;
         var action = typeof(Target).GetMethod(nameof(Target.Increment))!.CreateDelegate<RefAction>();
+        GC.KeepAlive(action);
+        return Result;
+    }
+
+    public static object ConstructorDelegateTypeInitialization()
+    {
+        Result = 0;
+        var pointer = typeof(Target).GetMethod(nameof(Target.Increment))!.MethodHandle.GetFunctionPointer();
+        var action = typeof(RefAction).GetConstructor([typeof(object), typeof(IntPtr)])!.Invoke([null, pointer]);
         GC.KeepAlive(action);
         return Result;
     }

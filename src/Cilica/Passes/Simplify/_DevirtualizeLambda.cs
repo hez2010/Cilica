@@ -38,7 +38,7 @@ partial class SimplifyInsts
 
         // Open binding can have runtime-specific failures and initialization
         // effects. Rewriting Invoke does not remove the original construction.
-        if (allocation.Args is [ConstNull, FuncAddrInst { Method.IsInstance: true }]) return true;
+        if (allocation.Args is [ConstNull, var pointer] && DelegateUtils.GetMethodAddress(pointer) is { Method.IsInstance: true }) return true;
         if (cache != null) cache.RemoveIfUnused();
         else if (allocation.NumUses == 0) allocation.Remove();
         return true;
@@ -46,13 +46,13 @@ partial class SimplifyInsts
 
     private bool DevirtualizeDelegate(CallInst call, NewObjInst allocation, LoadInst? cacheLoad, ICompilationLogger logger)
     {
-        if (allocation is not { Args: [var target, FuncAddrInst address] }) return false;
+        if (allocation.Args is not [var target, var pointer] || DelegateUtils.GetMethodAddress(pointer) is not { } address) return false;
         if (address.Constraint != null) return false;
         var method = address.Method;
 
         if (target is ConstNull) {
             if (address.IsVirtual) return false;
-            var replacement = CreateOpenDelegateCall(call, method);
+            var replacement = DelegateUtils.CreateOpenCall(call, method);
             if (replacement == null) return false;
 
             logger.Trace($"Replaced delegate invocation '{call}' in '{call.Block}' with a call to '{method}'.");
@@ -83,17 +83,6 @@ partial class SimplifyInsts
         call.SetArg(0, target);
         call.IsVirtual = address.IsVirtual;
         return true;
-    }
-
-    private static CallInst? CreateOpenDelegateCall(CallInst call, MethodDesc method)
-    {
-        if (method.IsInstance) return DelegateUtils.CreateOpenInstanceCall(call, method);
-        if (call.NumArgs - 1 != method.ParamSig.Count) return null;
-        return new CallInst(method, call.Args[1..].ToArray()) {
-            IsTailCall = call.IsTailCall,
-            ResultIsNonNull = call.ResultIsNonNull,
-            DebugLocation = call.DebugLocation
-        };
     }
 
     private static Value LoadCachedReceiver(FieldDesc field, LoadInst cacheLoad, NewObjInst allocation, CallInst call)

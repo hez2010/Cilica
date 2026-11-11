@@ -5,14 +5,24 @@ using System.Reflection;
 /// <summary> Constructs direct invocations of delegates with a proven binding. </summary>
 internal static class DelegateUtils
 {
+    public static bool IsDelegateType(TypeDesc type)
+        => type.BaseType?.IsCorelibType(typeof(MulticastDelegate)) == true;
+
+    public static FuncAddrInst? GetMethodAddress(Value value)
+    {
+        while (value is ConvertInst { CheckOverflow: false, ResultType.StackType: StackType.NInt,
+            Value.ResultType.StackType: StackType.NInt } conversion) value = conversion.Value;
+        return value as FuncAddrInst;
+    }
+
     internal static bool IsCompatibleSignature(TypeSig source, TypeSig target)
         => source == target || !source.HasModifiers && !target.HasModifiers &&
             source.Type is not GenericParamType && target.Type is not GenericParamType &&
             source.Type.IsManagedObject() && target.Type.IsManagedObject() && source.Type.IsAssignableTo(target.Type);
 
-    // The caller establishes an open binding. Compatible reference signatures
-    // let the explicit first argument become the method's receiver.
-    public static CallInst? CreateOpenInstanceCall(CallInst invocation, MethodDesc method)
+    // An open binding supplies every argument, including the receiver of an
+    // instance method. Reference parameters can have compatible variance.
+    public static CallInst? CreateOpenCall(CallInst invocation, MethodDesc method)
     {
         if (invocation.IsReadOnly || invocation.Constraint != null || invocation.Method.IsGeneric) return null;
         if ((invocation.Method.ImplAttribs & MethodImplAttributes.CodeTypeMask) != MethodImplAttributes.Runtime) return null;
@@ -25,7 +35,7 @@ internal static class DelegateUtils
 
         // Open virtual delegates dispatch on the supplied receiver. Nonvirtual
         // delegates may pass null through to a method that never dereferences it.
-        bool dispatch = !method.DeclaringType.IsValueType && method.Attribs.HasFlag(MethodAttributes.Virtual);
+        bool dispatch = method.IsInstance && !method.DeclaringType.IsValueType && method.Attribs.HasFlag(MethodAttributes.Virtual);
         return new CallInst(method, invocation.Args[1..].ToArray(), isVirtual: dispatch) {
             IsTailCall = invocation.IsTailCall,
             ResultIsNonNull = invocation.ResultIsNonNull,

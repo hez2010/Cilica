@@ -12,6 +12,115 @@ using Cilica.Passes;
 partial class FoldReflectionTests
 {
     [Theory]
+    [InlineData("MethodMetadata")]
+    [InlineData("FieldMetadata")]
+    [InlineData("ConstructorMetadata")]
+    [InlineData("AccessorMetadata")]
+    public void MemberConstructionUsesHandlesAndPreservesMetadataIdentity(string name)
+    {
+        foreach (bool defaultPipeline in new[] { false, true }) {
+            using var test = new Case(name);
+            var expected = (MemberInfo[])test.Original.Invoke(null, null)!;
+            test.Optimize(defaultPipeline: defaultPipeline, nativeAotCompatibility: true);
+            Assert.False(test.Method.ILBody!.Instructions.Any(instruction => IsMemberDiscovery(instruction.Operand)),
+                string.Join("\n", test.Method.ILBody.Instructions));
+            AssertMetadata(expected, (MemberInfo[])test.Emit().Invoke(null, null)!);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void InheritedMethodConstructionPreservesTheReflectedType(bool nativeAotCompatibility)
+    {
+        foreach (bool defaultPipeline in new[] { false, true }) {
+            using var test = new Case("InheritedMethodMetadata");
+            var expected = (MemberInfo[])test.Original.Invoke(null, null)!;
+            test.Optimize(defaultPipeline: defaultPipeline, nativeAotCompatibility: nativeAotCompatibility);
+            Assert.Equal(nativeAotCompatibility, test.Method.ILBody!.Instructions.Any(instruction => IsMemberDiscovery(instruction.Operand)));
+            AssertMetadata(expected, (MemberInfo[])test.Emit().Invoke(null, null)!);
+        }
+    }
+
+    [Fact]
+    public void MetadataWithoutAnEquivalentHandleRetainsDiscovery()
+    {
+        using var test = new Case("MetadataWithoutHandles");
+        var expected = (MemberInfo[])test.Original.Invoke(null, null)!;
+        test.Optimize(defaultPipeline: true);
+        Assert.Contains(test.Method.ILBody!.Instructions, instruction => IsMemberDiscovery(instruction.Operand));
+        AssertMetadata(expected, (MemberInfo[])test.Emit().Invoke(null, null)!);
+    }
+
+    [Theory]
+    [InlineData("MethodMetadata")]
+    [InlineData("FieldMetadata")]
+    [InlineData("ConstructorMetadata")]
+    [InlineData("AccessorMetadata")]
+    public void MemberConstructionRetainsRequestedTrimmingDependencies(string name)
+    {
+        using var test = new Case(name);
+        var expected = (MemberInfo[])test.Original.Invoke(null, null)!;
+        test.Optimize(preserveTrimmingDependencies: true);
+        Assert.Contains(test.Method.ILBody!.Instructions, instruction => IsMemberDiscovery(instruction.Operand));
+        Assert.DoesNotContain(test.Method.ILBody.Instructions, instruction => instruction.Operand is MethodDesc { Name: "GetMethodFromHandle" or "GetFieldFromHandle" });
+        AssertMetadata(expected, (MemberInfo[])test.Emit().Invoke(null, null)!);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MaterializedMethodsRetainRuntimeArgumentValidation(bool defaultPipeline)
+    {
+        using var test = new Case("InvokeWithRuntimeArguments");
+        test.Optimize(defaultPipeline: defaultPipeline);
+        Assert.DoesNotContain(test.Method.ILBody!.Instructions, instruction => IsMemberDiscovery(instruction.Operand));
+        var run = test.Emit().CreateDelegate<Func<object?[], object?>>();
+        Assert.Equal(42, run([42]));
+        Assert.Equal(0, run([null]));
+        Assert.Throws<TargetParameterCountException>(() => run([]));
+        Assert.Throws<ArgumentException>(() => run(["invalid"]));
+    }
+
+    [Fact]
+    public void MemberConstructionPreservesGetTypeReceiverValidation()
+    {
+        using var test = new Case("MetadataThroughNullableReceiver");
+        test.Optimize();
+        Assert.DoesNotContain(test.Method.ILBody!.Instructions, instruction => IsMemberDiscovery(instruction.Operand));
+        var run = test.Emit();
+        Assert.IsType<NullReferenceException>(Assert.Throws<TargetInvocationException>(() => run.Invoke(null, [null])).InnerException);
+        var targetType = run.GetParameters()[0].ParameterType;
+        Assert.Same(targetType.GetField("Value"), run.Invoke(null, [Activator.CreateInstance(targetType)]));
+    }
+
+    private static bool IsMemberDiscovery(object? operand)
+        => operand is MethodDesc method &&
+            (method.DeclaringType.IsCorelibType(typeof(Type)) && method.Name is "GetMethod" or "GetField" or "GetProperty" or "GetConstructor" ||
+             method.DeclaringType.IsCorelibType(typeof(MethodInfo)) && method.Name == "MakeGenericMethod" ||
+             method.DeclaringType.IsCorelibType(typeof(PropertyInfo)) && method.Name is "get_GetMethod" or "get_SetMethod" or "GetGetMethod" or "GetSetMethod");
+
+    private static void AssertMetadata(MemberInfo[] expected, MemberInfo[] actual)
+    {
+        Assert.Equal(expected.Length, actual.Length);
+        for (int i = 0; i < expected.Length; i++) {
+            var member = actual[i];
+            Assert.Equal(expected[i].Name, member.Name);
+            Assert.Equal(expected[i].MemberType, member.MemberType);
+            Assert.Equal(expected[i].DeclaringType!.ToString(), member.DeclaringType!.ToString());
+            Assert.Equal(expected[i].ReflectedType!.ToString(), member.ReflectedType!.ToString());
+            Assert.Equal(expected[i].ToString(), member.ToString());
+
+            var canonical = member.ReflectedType.GetMembers(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.FlattenHierarchy)
+                .Single(candidate => candidate.Module == member.Module && candidate.MetadataToken == member.MetadataToken);
+            if (member is MethodInfo { IsConstructedGenericMethod: true } constructed) {
+                canonical = ((MethodInfo)canonical).MakeGenericMethod(constructed.GetGenericArguments());
+            }
+            Assert.Same(canonical, member);
+        }
+    }
+
+    [Theory]
     [InlineData("Value", true)]
     [InlineData("Missing", false)]
     public void LookupsPreserveMembersWithCustomModifiedGenericArguments(string name, bool exists)

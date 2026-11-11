@@ -47,7 +47,7 @@ partial class ReflectionRewriter
         var delegateType = creation.Type;
         if (!ReflectionTypeFacts.IsRuntimeType(delegateType)) return null;
         if (!_typeFacts.CanInspectArgument(delegateType)) return null;
-        if (delegateType.BaseType?.IsCorelibType(typeof(MulticastDelegate)) != true) return null;
+        if (!DelegateUtils.IsDelegateType(delegateType)) return null;
         var invoke = delegateType.FindMethod("Invoke", throwIfNotFound: false);
         var constructor = delegateType.FindMethod(".ctor",
             new MethodSig(PrimType.Void, [PrimType.Object, PrimType.IntPtr], true), throwIfNotFound: false);
@@ -185,7 +185,7 @@ partial class ReflectionRewriter
                     continue;
                 }
                 if (MatchDelegateInvocation(user, delegateType) is not { } invocation) continue;
-                var direct = DelegateUtils.CreateOpenInstanceCall(invocation, method);
+                var direct = DelegateUtils.CreateOpenCall(invocation, method);
                 if (direct == null) continue;
 
                 // A factory that returns null must still fail at invocation,

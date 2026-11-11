@@ -55,7 +55,7 @@ public class CompilerPasses
 [MemoryDiagnoser]
 public class ReflectionFoldingBenchmarks
 {
-    public enum Workload { NamedMembers, WrappedInvocations, ArgumentArrays, FunctionPointers, InterfaceDelegates }
+    public enum Workload { NamedMembers, MemberMetadata, WrappedInvocations, ArgumentArrays, FunctionPointers, InterfaceDelegates }
 
     [Params(256, 1024, 4096)]
     public int Count { get; set; }
@@ -111,10 +111,14 @@ public class ReflectionFoldingBenchmarks
             }
         } else {
             var reflected = TypeOf(builder, owner);
-            if (Scenario == Workload.NamedMembers) {
+            if (Scenario is Workload.NamedMembers or Workload.MemberMetadata) {
                 for (int i = 0; i < Count; i++) owner.CreateField("Field" + i, PrimType.Int32, FieldAttributes.Public | FieldAttributes.Static);
                 var getField = typeType.FindMethod("GetField", new MethodSig(_resolver.Import(typeof(FieldInfo)), [PrimType.String], true));
-                for (int i = 0; i < Count; i++) builder.CreateCallVirt(getField, reflected, ConstString.Create("Field" + i));
+                var getName = _resolver.Import(typeof(MemberInfo)).FindMethod("get_Name");
+                for (int i = 0; i < Count; i++) {
+                    var field = builder.CreateCallVirt(getField, reflected, ConstString.Create("Field" + i));
+                    if (Scenario == Workload.MemberMetadata) builder.CreateCallVirt(getName, field);
+                }
             } else {
                 var target = owner.CreateMethod("Read", PrimType.Int32, Scenario == Workload.ArgumentArrays ? [new ParamDef(PrimType.Object, "value")] : [], MethodAttributes.Public | MethodAttributes.Static);
                 target.Body = new MethodBody(target);

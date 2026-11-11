@@ -26,7 +26,7 @@ internal sealed partial class ReflectionRewriter
         _ctx = ctx;
         _typeFacts = new ReflectionTypeFacts(ctx.Definition, ctx.Compilation.Settings.AllowCrossAssemblyIPO);
         _order = new InstructionOrder(ctx.Method);
-        _lookups = new ReflectionLookup(_typeFacts, _order);
+        _lookups = new ReflectionLookup(_typeFacts, _order, ctx.Compilation.Settings.NativeAotCompatibility);
         _access = new InliningAccess(ctx.Definition.DeclaringType,
             ignoreVisibility: ctx.Compilation.Module != ctx.Compilation.Resolver.CoreLib);
         if (ctx.Method.Instructions().OfType<GuardInst>().Any(guard => guard.HasFilter)) {
@@ -49,7 +49,7 @@ internal sealed partial class ReflectionRewriter
             FoldCall(call);
         }
 
-        _lookups.ApplyFacts(_ctx.Compilation.Settings.PreserveTrimmingDependencies, _ctx.Logger);
+        _lookups.ApplyFacts(_ctx.Compilation.Settings.PreserveTrimmingDependencies, _ctx.Logger, FoldMemberConstruction);
         if (_ctx.Method.Revision == revision) return MethodInvalidations.None;
         return _ctx.Method.ControlFlowRevision == controlFlowRevision
             ? MethodInvalidations.DataFlow : MethodInvalidations.ExceptionRegions;
@@ -112,7 +112,8 @@ internal sealed partial class ReflectionRewriter
         => !call.IsStatic && (call.Method.Name switch {
             "GetValue" or "SetValue" => call.Method.DeclaringType.IsCorelibType(typeof(FieldInfo)) ||
                 call.Method.DeclaringType.IsCorelibType(typeof(PropertyInfo)),
-            "Invoke" => call.Method.DeclaringType.IsCorelibType(typeof(MethodBase)),
+            "Invoke" => call.Method.DeclaringType.IsCorelibType(typeof(MethodBase)) ||
+                call.Method.DeclaringType.IsCorelibType(typeof(ConstructorInfo)),
             "get_MethodHandle" => IsMethodHandleCall(call),
             "GetFunctionPointer" => IsFunctionPointerCall(call),
             _ => false

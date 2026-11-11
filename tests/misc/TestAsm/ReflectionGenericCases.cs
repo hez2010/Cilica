@@ -4,6 +4,13 @@ using System.Diagnostics.CodeAnalysis;
 
 public static unsafe class ReflectionGenericCases
 {
+    public static MemberInfo[] GenericMetadata<T>() => [
+        typeof(Owner<T>).GetMethod(nameof(Owner<T>.Echo))!,
+        typeof(Owner<T>).GetMethod(nameof(Owner<T>.Describe))!.MakeGenericMethod(typeof(T)),
+        typeof(Box<T>).GetField(nameof(Box<T>.Value))!,
+        typeof(Box<T>).GetConstructor([typeof(T)])!
+    ];
+
     public static object GenericArityLookup()
         => typeof(Target).GetMethod(nameof(Target.GenericChoice), 1, [typeof(int)])!.MakeGenericMethod(typeof(string)).Invoke(null, new object[] { 42 })!;
 

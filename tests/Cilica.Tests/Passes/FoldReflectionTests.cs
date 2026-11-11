@@ -14,11 +14,13 @@ public partial class FoldReflectionTests
     [InlineData("KnownMethodExists")]
     [InlineData("KnownFieldExists")]
     [InlineData("KnownPropertyExists")]
+    [InlineData("KnownConstructorExists")]
     [InlineData("KnownGenericMethodExists")]
     [InlineData("KnownGenericTypeExists")]
     [InlineData("MissingMethodIsNull")]
     [InlineData("MissingFieldIsNull")]
     [InlineData("MissingPropertyIsNull")]
+    [InlineData("MissingConstructorIsNull")]
     [InlineData("ExcludedFieldIsNull")]
     [InlineData("MissingAccessorIsNull")]
     [InlineData("ExcludedAccessorIsNull")]
@@ -40,6 +42,7 @@ public partial class FoldReflectionTests
     [InlineData("MissingMethodOperatorNullCheck")]
     [InlineData("KnownFieldOperatorNullCheck")]
     [InlineData("KnownPropertyOperatorNullCheck")]
+    [InlineData("KnownConstructorOperatorNullCheck")]
     [InlineData("KnownTypeOperatorNullCheck")]
     [InlineData("KnownMemberOperatorNullCheck")]
     [InlineData("KnownMethodBaseOperatorNullCheck")]
@@ -126,6 +129,15 @@ public partial class FoldReflectionTests
 
     [Theory]
     [InlineData("Fields", 42)]
+    [InlineData("ParameterlessConstructor", 7)]
+    [InlineData("ConstructorArguments", 42)]
+    [InlineData("GenericConstructor", 42)]
+    [InlineData("StructConstructor", 42)]
+    [InlineData("NullableConstructor", 42)]
+    [InlineData("ConstructorCopyBack", true)]
+    [InlineData("ConstructorException", "InvalidOperationException")]
+    [InlineData("UnwrappedConstructorException", "constructor failure")]
+    [InlineData("ConstructorInitialization", "TypeInitializationException")]
     [InlineData("StaticFields", "updated")]
     [InlineData("ObjectFieldStoresMissing", true)]
     [InlineData("StructFieldLoad", 42)]
@@ -210,7 +222,7 @@ public partial class FoldReflectionTests
 
             Assert.DoesNotContain(test.Method.ILBody!.Instructions, instruction => IsReflectionAccess(instruction.Operand));
             Assert.DoesNotContain(test.Method.ILBody.Instructions, instruction => instruction.Operand is MethodDesc method &&
-                method.DeclaringType.IsCorelibType(typeof(Type)) && method.Name is "GetField" or "GetMethod" or "GetProperty");
+                method.DeclaringType.IsCorelibType(typeof(Type)) && method.Name is "GetField" or "GetMethod" or "GetProperty" or "GetConstructor");
             Assert.Equal(expected, test.Emit().Invoke(null, null));
         }
     }
@@ -228,6 +240,10 @@ public partial class FoldReflectionTests
     [InlineData("InvocationInsideFilter", 42)]
     [InlineData("PropertyInsideFilter", 42)]
     [InlineData("RequiredBinder", "binder")]
+    [InlineData("ExistingConstructorReceiver", 42)]
+    [InlineData("StaticConstructorInvocation", 1)]
+    [InlineData("AbstractConstructor", "MemberAccessException")]
+    [InlineData("InvalidConstructorArguments", "ArgumentException")]
     public void UnsupportedAccessesRetainReflectionBehavior(string name, object expected)
     {
         foreach (bool defaultPipeline in new[] { false, true }) {
@@ -304,12 +320,12 @@ public partial class FoldReflectionTests
     }
 
     [Fact]
-    public void DiscoveryRemainsWhenItsMetadataIsObserved()
+    public void ObservedFieldMetadataUsesAHandle()
     {
         using var test = new Case("LookupStillUsed");
         test.Optimize();
         Assert.DoesNotContain(test.Method.ILBody!.Instructions, instruction => IsReflectionAccess(instruction.Operand));
-        Assert.Contains(test.Method.ILBody.Instructions, instruction => instruction.Operand is MethodDesc { Name: "GetField" });
+        Assert.DoesNotContain(test.Method.ILBody.Instructions, instruction => instruction.Operand is MethodDesc { Name: "GetField" });
         Assert.Equal("Value:7", test.Emit().Invoke(null, null));
     }
 
@@ -411,7 +427,7 @@ public partial class FoldReflectionTests
         using var test = new Case("MetadataObserved", "ReflectionAccessorCases");
         test.Optimize();
         Assert.DoesNotContain(test.Method.ILBody!.Instructions, instruction => IsReflectionFactory(instruction.Operand));
-        Assert.Contains(test.Method.ILBody.Instructions, instruction => instruction.Operand is MethodDesc { Name: "get_GetMethod" });
+        Assert.DoesNotContain(test.Method.ILBody.Instructions, instruction => instruction.Operand is MethodDesc { Name: "get_GetMethod" });
         Assert.Equal("get_ReadOnly:42", test.Emit().Invoke(null, null));
     }
 

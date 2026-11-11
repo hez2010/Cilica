@@ -9,6 +9,23 @@ using Cilica.Passes;
 partial class FoldReflectionTests
 {
     [Theory]
+    [InlineData("ConstructorDelegate", false)]
+    [InlineData("ConstructorDelegate", true)]
+    [InlineData("ConstructedReceiverDelegate", false)]
+    [InlineData("ConstructedReceiverDelegate", true)]
+    public void ReflectedConstructorsComposeWithDelegateFolding(string name, bool nativeAotCompatibility)
+    {
+        using var test = new Case(name, "ReflectionDelegateCases");
+        Assert.Equal(42, test.Original.Invoke(null, null));
+        test.Optimize(defaultPipeline: true, nativeAotCompatibility: nativeAotCompatibility);
+        Assert.DoesNotContain(test.Method.ILBody!.Instructions, instruction => IsMemberDiscovery(instruction.Operand));
+        bool retainsInvocation = nativeAotCompatibility && name == "ConstructorDelegate";
+        Assert.Equal(retainsInvocation, test.Method.ILBody.Instructions.Any(instruction =>
+            IsReflectionAccess(instruction.Operand) || IsReflectionFactory(instruction.Operand) || IsDelegateInvoke(instruction.Operand)));
+        Assert.Equal(42, test.Emit().Invoke(null, null));
+    }
+
+    [Theory]
     [InlineData("OpenInstance", 42)]
     [InlineData("OpenVirtual", 42)]
     [InlineData("OpenUntyped", 42)]
@@ -333,17 +350,21 @@ partial class FoldReflectionTests
     }
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(false, true)]
-    [InlineData(true, false)]
-    [InlineData(true, true)]
-    public void DelegateTypeInitializersRetainTheirActivationTiming(bool defaultPipeline, bool beforeFieldInit)
+    [InlineData("DelegateTypeInitialization", false, false)]
+    [InlineData("DelegateTypeInitialization", false, true)]
+    [InlineData("DelegateTypeInitialization", true, false)]
+    [InlineData("DelegateTypeInitialization", true, true)]
+    [InlineData("ConstructorDelegateTypeInitialization", false, false)]
+    [InlineData("ConstructorDelegateTypeInitialization", false, true)]
+    [InlineData("ConstructorDelegateTypeInitialization", true, false)]
+    [InlineData("ConstructorDelegateTypeInitialization", true, true)]
+    public void DelegateTypeInitializersRetainTheirActivationTiming(string name, bool defaultPipeline, bool beforeFieldInit)
     {
-        using var test = new Case("DelegateTypeInitialization", "ReflectionDelegateCases");
+        using var test = new Case(name, "ReflectionDelegateCases");
         test.AddDelegateTypeInitializer(beforeFieldInit);
         object? expected = test.Emit().Invoke(null, null);
         test.Optimize(defaultPipeline: defaultPipeline);
-        Assert.DoesNotContain(test.Method.ILBody!.Instructions, instruction => IsReflectionFactory(instruction.Operand));
+        Assert.DoesNotContain(test.Method.ILBody!.Instructions, instruction => IsReflectionFactory(instruction.Operand) || IsReflectionAccess(instruction.Operand));
         Assert.Equal(expected, test.Emit().Invoke(null, null));
     }
 

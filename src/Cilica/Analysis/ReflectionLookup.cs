@@ -3,7 +3,7 @@ namespace Cilica.Analysis;
 using System.Reflection;
 
 /// <summary> Resolves unambiguous, constant reflection lookups against assembly metadata. </summary>
-internal sealed partial class ReflectionLookup(ReflectionTypeFacts types, InstructionOrder order)
+internal sealed partial class ReflectionLookup(ReflectionTypeFacts types, InstructionOrder order, bool nativeAotCompatibility)
 {
     const BindingFlags SupportedFlags = BindingFlags.Public | BindingFlags.NonPublic |
         BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly | BindingFlags.FlattenHierarchy | BindingFlags.IgnoreCase | BindingFlags.ExactBinding;
@@ -14,7 +14,7 @@ internal sealed partial class ReflectionLookup(ReflectionTypeFacts types, Instru
         public TypeDefOrSpec Owner => DeclaringType ?? ReflectedType;
     }
 
-    readonly Dictionary<CallInst, Result?> _resolvedMembers = new();
+    readonly Dictionary<Value, Result?> _resolvedMembers = new();
     readonly Dictionary<CallInst, TypeDesc?> _resolvedTypes = new();
     readonly Dictionary<CallInst, KnownArray> _lookupArrays = new();
     readonly List<(CallInst Call, bool NonNull)> _lookupFacts = new();
@@ -25,8 +25,21 @@ internal sealed partial class ReflectionLookup(ReflectionTypeFacts types, Instru
 
     public Result? Resolve(Value value)
     {
+        if (_resolvedMembers.TryGetValue(value, out var result)) return result;
+        if (value is CilIntrinsic.RefCast or CilIntrinsic.CastClass) {
+            var cast = (IntrinsicInst)value;
+            var member = Resolve(cast.Args[0]);
+            var metadataType = member?.Member switch {
+                MethodDesc method => types.Resolver.Import(method.IsConstructor || method.IsStaticConstructor ? typeof(ConstructorInfo) : typeof(MethodInfo)),
+                FieldDesc => types.Resolver.Import(typeof(FieldInfo)),
+                PropertyDef => types.Resolver.Import(typeof(PropertyInfo)),
+                _ => null
+            };
+            result = metadataType?.IsAssignableTo(cast.ResultType) == true ? member : null;
+            _resolvedMembers.Add(value, result);
+            return result;
+        }
         if (value is not CallInst call) return null;
-        if (_resolvedMembers.TryGetValue(call, out var result)) return result;
         try {
             result = ResolveMember(call);
         } catch (NotSupportedException) {
@@ -42,7 +55,7 @@ internal sealed partial class ReflectionLookup(ReflectionTypeFacts types, Instru
     {
         if (value is not CallInst call) return null;
         if (_resolvedTypes.TryGetValue(call, out var type)) return type;
-        type = TypeUtils.GetReflectedType(call) ?? ResolveGenericType(call);
+        type = TypeUtils.GetReflectedType(call) ?? ResolveGenericType(call) ?? ResolveByrefType(call);
         if (call.Method.Name == "GetType" && type is TypeDefOrSpec nominal && !types.CanInspect(nominal)) type = null;
         _resolvedTypes.Add(call, type);
         if (type != null) _lookupFacts.Add((call, true));
@@ -55,10 +68,35 @@ internal sealed partial class ReflectionLookup(ReflectionTypeFacts types, Instru
                 when lookup.Method.DeclaringType.IsCorelibType(typeof(PropertyInfo)) => ResolveAccessor(lookup),
             "MakeGenericMethod"
                 when lookup.Method.DeclaringType.IsCorelibType(typeof(MethodInfo)) => ResolveGenericMethod(lookup),
-            "GetField" or "GetMethod" or "GetProperty"
+            "GetField" or "GetMethod" or "GetProperty" or "GetConstructor"
                 when lookup.Method.DeclaringType.IsCorelibType(typeof(Type)) => ResolveNamedMember(lookup),
+            "GetMethodFromHandle" or "GetFieldFromHandle" when IsHandleLookup(lookup) => ResolveHandle(lookup),
             _ => null
         };
+
+    private Result? ResolveHandle(CallInst call)
+    {
+        if (!call.IsStatic || call.Args[0] is not CilIntrinsic.LoadHandle handle) return null;
+        var member = handle.Entity switch {
+            MethodDefOrSpec method when call.Method.DeclaringType.IsCorelibType(typeof(MethodBase)) => (MemberDesc)method,
+            FieldDefOrSpec field when call.Method.DeclaringType.IsCorelibType(typeof(FieldInfo)) && !field.Attribs.HasFlag(FieldAttributes.Literal) => field,
+            _ => null
+        };
+        if (member?.DeclaringType is not TypeDefOrSpec owner || !types.CanInspect(owner)) return null;
+
+        TypeDefOrSpec reflected;
+        if (call.NumArgs == 1) {
+            if (owner.IsGeneric) return null;
+            reflected = owner;
+        } else if (call.NumArgs == 2 && call.Args[1] is CilIntrinsic.LoadHandle { Entity: TypeDefOrSpec type }) {
+            // Other type/handle combinations can rebind generic contexts or
+            // throw. Only an exact context is needed to recognize emitted IL.
+            if (type != owner && (nativeAotCompatibility || member is not MethodDefOrSpec ||
+                !types.CanInspectHierarchy(type) || !Hierarchy(type).Contains(owner))) return null;
+            reflected = type;
+        } else return null;
+        return new(member, reflected, owner);
+    }
 
     private TypeDesc? ResolveGenericType(CallInst call)
     {
@@ -71,6 +109,13 @@ internal sealed partial class ReflectionLookup(ReflectionTypeFacts types, Instru
 
         _lookupArrays.Add(call, array);
         return definition.GetSpec(arguments);
+    }
+
+    private TypeDesc? ResolveByrefType(CallInst call)
+    {
+        if (call.IsStatic || call.NumArgs != 1 || call.Method.Name != "MakeByRefType" ||
+            !call.Method.DeclaringType.IsCorelibType(typeof(Type))) return null;
+        return ResolveType(call.Args[0]) is { } element and not ByrefType ? element.CreateByref() : null;
     }
 
     private Result? ResolveGenericMethod(CallInst lookup)
@@ -140,20 +185,25 @@ internal sealed partial class ReflectionLookup(ReflectionTypeFacts types, Instru
 
     public static bool IsMemberLookup(CallInst call)
         => call.Method.Name switch {
-            "GetField" or "GetMethod" or "GetProperty" => call.Method.DeclaringType.IsCorelibType(typeof(Type)),
+            "GetField" or "GetMethod" or "GetProperty" or "GetConstructor" => call.Method.DeclaringType.IsCorelibType(typeof(Type)),
             "get_GetMethod" or "get_SetMethod" or "GetGetMethod" or "GetSetMethod" => call.Method.DeclaringType.IsCorelibType(typeof(PropertyInfo)),
             "MakeGenericMethod" => call.Method.DeclaringType.IsCorelibType(typeof(MethodInfo)),
+            "GetMethodFromHandle" or "GetFieldFromHandle" => IsHandleLookup(call),
             _ => false
         };
 
+    public static bool IsHandleLookup(CallInst call)
+        => call.Method.Name == "GetMethodFromHandle" && call.Method.DeclaringType.IsCorelibType(typeof(MethodBase)) ||
+           call.Method.Name == "GetFieldFromHandle" && call.Method.DeclaringType.IsCorelibType(typeof(FieldInfo));
+
     public static bool IsTypeLookup(CallInst call)
         => call.Method.Name switch {
-            "GetTypeFromHandle" => call.Method.DeclaringType.IsCorelibType(typeof(Type)),
+            "GetTypeFromHandle" or "MakeByRefType" => call.Method.DeclaringType.IsCorelibType(typeof(Type)),
             "GetType" => call.Method.DeclaringType.IsCorelibType(typeof(object)),
             _ => false
         };
 
-    public void ApplyFacts(bool preserveTrimmingDependencies, ICompilationLogger logger)
+    public void ApplyFacts(bool preserveTrimmingDependencies, ICompilationLogger logger, Action<CallInst, Result> materializeMember)
     {
         // Resolve records dependencies first. Visit consumers first so their
         // removal can expose unused prerequisite lookups in the same traversal.
@@ -170,6 +220,12 @@ internal sealed partial class ReflectionLookup(ReflectionTypeFacts types, Instru
                 foreach (var check in call.Users().AsEnumerable().OfType<CilIntrinsic.NullCheck>().ToArray()) {
                     check.Remove();
                 }
+                foreach (var cast in call.Users().AsEnumerable().OfType<CilIntrinsic.RefCast>().ToArray()) {
+                    if (cast.NumUses == 0) cast.Remove();
+                }
+            }
+            if (call.NumUses != 0 && _resolvedMembers.TryGetValue(call, out var member) && member?.Member != null) {
+                materializeMember(call, member);
             }
             if (call.NumUses != 0) continue;
             // Object.GetType still validates its receiver even if its result is known.
