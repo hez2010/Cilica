@@ -44,11 +44,11 @@ partial class ReflectionLookup
             _ => 0
         };
         public TypeDesc[] ParameterTypes => _parameters ??= member switch {
-            MethodDesc method => method.ParamSig.Skip(method.IsInstance ? 1 : 0).Select(parameter => parameter.Type).ToArray(),
-            PropertyDef property => property.Sig.ParamTypes.Select(parameter => parameter.Type.GetSpec(new GenericContext(owner))).ToArray(),
+            MethodDesc method => method.ParamSig.Skip(method.IsInstance ? 1 : 0).Select(parameter => TypeUtils.GetRuntimeType(parameter.Type)).ToArray(),
+            PropertyDef property => property.Sig.ParamTypes.Select(parameter => TypeUtils.GetRuntimeType(parameter.Type.GetSpec(new GenericContext(owner)))).ToArray(),
             _ => []
         };
-        public TypeDesc PropertyType => ((PropertyDef)member).Sig.ReturnType.Type.GetSpec(new GenericContext(owner));
+        public TypeDesc PropertyType => TypeUtils.GetRuntimeType(((PropertyDef)member).Sig.ReturnType.Type.GetSpec(new GenericContext(owner)));
         public bool HasOpenParameters => ParameterTypes.Any(type => type.IsUnboundGeneric);
         public bool HasMethodVariables => member is MethodDesc { IsGeneric: true } && ParameterTypes.Any(ContainsMethodVariable);
         public Result AsResult(TypeDefOrSpec reflectedType) => new(member, reflectedType, owner);
@@ -56,7 +56,7 @@ partial class ReflectionLookup
 
     sealed class MemberIndex
     {
-        public readonly Dictionary<(MemberTypes Kind, bool IgnoreCase), ILookup<string, MemberDesc>> Names = new();
+        public readonly Dictionary<(MemberTypes Kind, bool IgnoreCase), ILookup<string, MemberDesc>?> Names = new();
         public readonly Dictionary<MemberQuery, Result?> Selections = new();
         public TypeDefOrSpec[]? FieldOwners;
     }
@@ -112,10 +112,12 @@ partial class ReflectionLookup
                 genericArity = (int)arity.Value;
             } else if (parameter is ArrayType { ElemType: var element } && element.IsCorelibType(typeof(Type))) {
                 if (!TryReadParameterTypes(value, lookup, out parameters, out array)) return false;
+                parameters = parameters.Select(TypeUtils.GetRuntimeType).ToImmutableArray();
             } else if (parameter.IsCorelibType(typeof(Type)) && kind == MemberTypes.Property) {
                 if (value is ConstNull) continue;
                 propertyType = ResolveType(value);
                 if (propertyType == null) return false;
+                propertyType = TypeUtils.GetRuntimeType(propertyType);
             } else if (parameter.IsCorelibType(typeof(CallingConventions))) {
                 if (value is not ConstInt convention || convention.Value is not ((int)CallingConventions.Any or (int)CallingConventions.Standard)) return false;
             } else if (parameter.IsCorelibType(typeof(Binder)) || parameter is ArrayType { ElemType: var modifier } && modifier.IsCorelibType(typeof(ParameterModifier))) {
@@ -147,7 +149,8 @@ partial class ReflectionLookup
         foreach (var owner in CandidateOwners(type, query)) {
             if (owner != type && !types.CanInspect(owner) && !owner.IsCorelibType()) return null;
             bool inherited = owner != type;
-            foreach (var member in NamedMembers(owner, query)) {
+            if (NamedMembers(owner, query) is not { } members) return null;
+            foreach (var member in members) {
                 if (member is MethodDefOrSpec method) {
                     if (inherited && method.Attribs.HasFlag(MethodAttributes.Virtual)) {
                         if (TypeUtils.HasClassMethodImpls(method) || ResolveVirtualMethod(method, type) is not MethodDefOrSpec target) return null;
@@ -260,10 +263,11 @@ partial class ReflectionLookup
         for (var owner = type; owner != null; owner = owner.BaseType) yield return owner;
     }
 
-    private IEnumerable<MemberDesc> NamedMembers(TypeDefOrSpec type, MemberQuery query)
+    private IEnumerable<MemberDesc>? NamedMembers(TypeDefOrSpec type, MemberQuery query)
     {
         var cache = Index(type).Names;
         bool ignoreCase = query.Flags.HasFlag(BindingFlags.IgnoreCase);
+        if (ignoreCase && !IsAsciiName(query.Name)) return null;
         var key = (query.Kind, ignoreCase);
         if (!cache.TryGetValue(key, out var names)) {
             IEnumerable<MemberDesc> members = query.Kind switch {
@@ -275,10 +279,15 @@ partial class ReflectionLookup
             };
             names = members.ToLookup(member => query.Kind == MemberTypes.Constructor ? ".ctor" : member.Name,
                 ignoreCase ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            // Reflection's Unicode casing is runtime-specific and differs from
+            // OrdinalIgnoreCase. Non-ASCII declarations can also match ASCII queries.
+            if (ignoreCase && names.SelectMany(group => group).Any(member => !IsAsciiName(member.Name))) names = null;
             cache.Add(key, names);
         }
-        return names[query.Name];
+        return names?[query.Name];
     }
+
+    private static bool IsAsciiName(string name) => name.All(char.IsAscii);
 
     private static bool ContainsMethodVariable(TypeDesc type) => type switch {
         GenericParamType parameter => parameter.IsMethodParam,

@@ -465,16 +465,18 @@ partial class FoldReflectionTests
     [InlineData("OpenOwnerHandle", "Owner`1", true, "Read")]
     [InlineData("AbstractHandle", "Abstract", false, "Read")]
     [InlineData("GenericDefinitionHandle", "Target", false, "Echo")]
-    public void MethodHandlesKeepTheirMetadataIdentity(string name, string owner, bool open, string member)
+    [InlineData("OpenInheritedHandle", "GenericDerived`1", true, "Echo", "ReflectionCases", false)]
+    public void MethodHandlesKeepTheirMetadataIdentity(string name, string owner, bool open, string member,
+        string caseType = "ReflectionGenericCases", bool folds = true)
     {
         foreach (bool pipeline in new[] { false, true }) {
-            using var test = new Case(name, "ReflectionGenericCases");
+            using var test = new Case(name, caseType);
             test.Optimize(defaultPipeline: pipeline);
             var run = test.Emit();
             var declaringType = run.DeclaringType!.GetNestedType(owner)!;
             if (declaringType.IsGenericTypeDefinition && !open) declaringType = declaringType.MakeGenericType(typeof(int));
             Assert.Equal(declaringType.GetMethod(member)!.MethodHandle, (RuntimeMethodHandle)run.Invoke(null, null)!);
-            Assert.DoesNotContain(test.Method.ILBody!.Instructions, instruction => IsReflectionFactory(instruction.Operand));
+            Assert.Equal(!folds, test.Method.ILBody!.Instructions.Any(instruction => IsReflectionFactory(instruction.Operand)));
         }
     }
 

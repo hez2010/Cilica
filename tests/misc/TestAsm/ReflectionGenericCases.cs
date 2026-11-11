@@ -8,7 +8,9 @@ public static unsafe class ReflectionGenericCases
         typeof(Owner<T>).GetMethod(nameof(Owner<T>.Echo))!,
         typeof(Owner<T>).GetMethod(nameof(Owner<T>.Describe))!.MakeGenericMethod(typeof(T)),
         typeof(Box<T>).GetField(nameof(Box<T>.Value))!,
-        typeof(Box<T>).GetConstructor([typeof(T)])!
+        typeof(Box<T>).GetConstructor([typeof(T)])!,
+        typeof(ReflectionCases.GenericDerived<T>).GetMethod("Echo")!.MakeGenericMethod(typeof(T)),
+        typeof(ReflectionCases.GenericDerived<T>).GetProperty("Property")!.GetMethod!
     ];
 
     public static object GenericArityLookup()

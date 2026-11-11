@@ -42,6 +42,10 @@ internal sealed partial class ReflectionLookup(ReflectionTypeFacts types, Instru
         if (value is not CallInst call) return null;
         try {
             result = ResolveMember(call);
+            // A constructed base of an open definition carries that definition's
+            // variables. Member descriptors consumed by the pass use the caller's
+            // generic context, so these lookups must remain runtime operations.
+            if (result is { ReflectedType: TypeDef { IsGeneric: true }, Owner: TypeSpec { IsUnboundGeneric: true } }) result = null;
         } catch (NotSupportedException) {
             // Unsupported metadata signatures make this optional lookup unknown.
             result = null;

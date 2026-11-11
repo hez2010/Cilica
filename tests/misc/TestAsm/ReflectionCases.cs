@@ -45,6 +45,7 @@ public static class ReflectionCases
         typeof(ReflectionGenericCases.IValue).GetMethod("Read")!,
         typeof(ReflectionGenericCases.Owner<int>).GetMethod("Echo")!,
         typeof(ReflectionGenericCases.Owner<>).GetMethod("Echo")!,
+        typeof(GenericTarget<>).GetMethod("Echo")!.MakeGenericMethod(typeof(int)),
         typeof(ReflectionGenericCases.Owner<int>).GetMethod("Describe")!.MakeGenericMethod(typeof(string))
     ];
 
@@ -85,6 +86,8 @@ public static class ReflectionCases
         typeof(GenericDerived).GetProperty(nameof(GenericDerived.Property))!.GetMethod!,
         typeof(GenericDerived).GetMethod(nameof(GenericDerived.Echo))!,
         typeof(GenericDerived).GetMethod(nameof(GenericDerived.Echo))!.MakeGenericMethod(typeof(string)),
+        typeof(GenericDerived<string>).GetMethod("Echo")!.MakeGenericMethod(typeof(int)),
+        typeof(GenericDerived<string>).GetProperty("Property")!.GetMethod!,
         typeof(LookupDerived).GetMethod("set_PrivateGet")!
     ];
 
@@ -93,8 +96,14 @@ public static class ReflectionCases
         typeof(Target).GetField(nameof(Target.EnumConstant))!,
         typeof(Target).GetField(nameof(Target.StringConstant))!,
         typeof(Target).GetField(nameof(Target.Inherited))!,
-        typeof(GenericDerived).GetField(nameof(GenericDerived.Value))!
+        typeof(GenericDerived).GetField(nameof(GenericDerived.Value))!,
+        typeof(GenericDerived<>).GetMethod("Echo")!,
+        typeof(GenericDerived<>).GetMethod("Echo")!.MakeGenericMethod(typeof(int)),
+        typeof(GenericDerived<>).GetProperty("Property")!.GetMethod!,
+        typeof(GenericDerived<>).GetField("Value")!
     ];
+
+    public static RuntimeMethodHandle OpenInheritedHandle() => typeof(GenericDerived<>).GetMethod("Echo")!.MethodHandle;
 
     public static object? InvokeWithRuntimeArguments(object?[] arguments)
         => typeof(Target).GetMethod(nameof(Target.Echo))!.Invoke(null, arguments);
@@ -834,6 +843,9 @@ public static class ReflectionCases
         public new string ChangedType => "derived";
         public int FIELD;
         public int Declared;
+        public static int \u03C2() => 42;
+        public int \u212A;
+        public int \u00C5 { get; set; }
     }
 
     public class Base
@@ -924,6 +936,7 @@ public static class ReflectionCases
     }
 
     public sealed class GenericDerived : GenericTarget<int> { }
+    public sealed class GenericDerived<T> : GenericTarget<List<T>> { }
 
     public struct InitializedValue
     {

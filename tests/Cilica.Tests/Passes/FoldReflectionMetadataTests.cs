@@ -42,12 +42,14 @@ partial class FoldReflectionTests
         }
     }
 
-    [Fact]
-    public void MetadataWithoutAnEquivalentHandleRetainsDiscovery()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MetadataWithoutAnEquivalentHandleRetainsDiscovery(bool defaultPipeline)
     {
         using var test = new Case("MetadataWithoutHandles");
         var expected = (MemberInfo[])test.Original.Invoke(null, null)!;
-        test.Optimize(defaultPipeline: true);
+        test.Optimize(defaultPipeline: defaultPipeline);
         Assert.Contains(test.Method.ILBody!.Instructions, instruction => IsMemberDiscovery(instruction.Operand));
         AssertMetadata(expected, (MemberInfo[])test.Emit().Invoke(null, null)!);
     }
@@ -163,5 +165,83 @@ partial class FoldReflectionTests
         var compilation = new Compilation(body.Definition.Module, new VoidLogger(), new() { VerifyEachPass = true });
         PassRunner.Run(new FoldReflection(), new MethodTransformContext(compilation, body));
         Assert.Equal(exists, Utils.Compile<Func<bool>>(body)());
+    }
+
+    [Theory]
+    [InlineData("ParameterModifier", true)]
+    [InlineData("ReturnModifier", true)]
+    [InlineData("NestedPointer", true)]
+    [InlineData("Array", true)]
+    [InlineData("UnmanagedConventions", true)]
+    [InlineData("ManagedAndUnmanaged", false)]
+    [InlineData("DistinctParameters", false)]
+    [InlineData("DistinctResults", false)]
+    public void SignatureLookupsUseRuntimeTypeIdentity(string scenario, bool ambiguous)
+    {
+        foreach (bool defaultPipeline in new[] { false, true }) {
+            using var resolver = new ModuleResolver();
+            resolver.AddTrustedSearchPaths();
+            var modifier = new TypeModifier(resolver.Import(typeof(System.Runtime.InteropServices.InAttribute)), true);
+            var byref = PrimType.Int32.CreateByref();
+            TypeDesc first = new FuncPtrType(new MethodSig(PrimType.Void, [byref], false));
+            TypeDesc second = new FuncPtrType(new MethodSig(PrimType.Void, [new TypeSig(byref, [modifier])], false));
+            switch (scenario) {
+                case "ReturnModifier":
+                    first = new FuncPtrType(new MethodSig(byref, [], false));
+                    second = new FuncPtrType(new MethodSig(new TypeSig(byref, [modifier]), [], false));
+                    break;
+                case "NestedPointer":
+                    first = new FuncPtrType(new MethodSig(PrimType.Void, [first], false));
+                    second = new FuncPtrType(new MethodSig(PrimType.Void, [second], false));
+                    break;
+                case "Array":
+                    first = first.CreateArray();
+                    second = second.CreateArray();
+                    break;
+                case "UnmanagedConventions":
+                    first = new FuncPtrType(new MethodSig(PrimType.Void, [byref], new SignatureHeader(SignatureKind.Method, SignatureCallingConvention.CDecl, 0)));
+                    second = new FuncPtrType(new MethodSig(PrimType.Void, [byref], new SignatureHeader(SignatureKind.Method, SignatureCallingConvention.StdCall, 0)));
+                    break;
+                case "ManagedAndUnmanaged":
+                    second = new FuncPtrType(new MethodSig(PrimType.Void, [byref], new SignatureHeader(SignatureKind.Method, SignatureCallingConvention.Unmanaged, 0)));
+                    break;
+                case "DistinctParameters":
+                    second = new FuncPtrType(new MethodSig(PrimType.Void, [PrimType.Int64.CreateByref()], false));
+                    break;
+                case "DistinctResults":
+                    second = new FuncPtrType(new MethodSig(PrimType.Int32, [byref], false));
+                    break;
+            }
+
+            var methodInfo = resolver.Import(typeof(MethodInfo));
+            var body = Utils.CreateTestMethod(resolver, methodInfo);
+            var owner = body.Definition.DeclaringType;
+            foreach (var parameter in new[] { first, second }) {
+                var overload = owner.CreateMethod("Select", PrimType.Void, [new ParamDef(parameter, "value")], MethodAttributes.Public | MethodAttributes.Static);
+                overload.Body = new Cilica.IR.MethodBody(overload);
+                new IRBuilder(overload.Body.CreateBlock()).CreateReturn();
+            }
+            var builder = new IRBuilder(body.CreateBlock());
+            var typeType = resolver.Import(typeof(Type));
+            var parameters = builder.CreateNewArray(typeType, ConstInt.CreateI(1));
+            builder.CreateArrayStore(parameters, ConstInt.CreateI(0), ReflectType(builder, second));
+            var lookup = typeType.FindMethod("GetMethod", new MethodSig(methodInfo, [PrimType.String, typeType.CreateArray()], true));
+            builder.CreateReturn(builder.CreateCallVirt(lookup, ReflectType(builder, owner), ConstString.Create("Select"), parameters));
+
+            var original = Utils.Compile<Func<MethodInfo?>>(body);
+            int? expectedToken = null;
+            if (ambiguous) Assert.Throws<AmbiguousMatchException>(() => original());
+            else expectedToken = original()!.MetadataToken;
+
+            var compilation = new Compilation(owner.Module, new VoidLogger(), new() { VerifyEachPass = true });
+            if (defaultPipeline) {
+                Assert.True(CompilationPipeline.CreateDefault(compilation).Run([body.Definition]).Succeeded);
+            } else {
+                PassRunner.Run(new FoldReflection(), new MethodTransformContext(compilation, body));
+            }
+            var optimized = Utils.Compile<Func<MethodInfo?>>(body.Definition.Body!);
+            if (ambiguous) Assert.Throws<AmbiguousMatchException>(() => optimized());
+            else Assert.Equal(expectedToken, optimized()!.MetadataToken);
+        }
     }
 }

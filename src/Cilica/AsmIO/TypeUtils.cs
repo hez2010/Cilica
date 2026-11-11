@@ -1,6 +1,7 @@
 namespace Cilica.AsmIO;
 
 using System.Reflection;
+using System.Reflection.Metadata;
 
 public static class TypeUtils
 {
@@ -190,7 +191,7 @@ public static class TypeUtils
         return false;
     }
 
-    /// <summary> Removes element modifiers that do not participate in runtime type identity. </summary>
+    /// <summary> Removes signature details that do not participate in runtime type identity. </summary>
     internal static TypeDesc GetRuntimeType(TypeDesc type)
     {
         if (type is CompoundType compound) {
@@ -207,6 +208,18 @@ public static class TypeUtils
         if (type is TypeSpec nominal) {
             var arguments = nominal.GenericParams.Select(GetRuntimeType).ToImmutableArray();
             if (!arguments.SequenceEqual(nominal.GenericParams)) return nominal.Definition.GetSpec(arguments);
+        }
+        if (type is FuncPtrType pointer) {
+            var signature = pointer.Signature;
+            // Runtime function-pointer types retain managed/unmanaged identity,
+            // but custom modifiers and individual unmanaged conventions do not.
+            var convention = signature.CallConv is CallConvention.CDecl or CallConvention.StdCall or CallConvention.ThisCall or CallConvention.FastCall
+                ? SignatureCallingConvention.Unmanaged : signature.Header.CallingConvention;
+            var header = new SignatureHeader(signature.Header.Kind, convention, signature.Header.Attributes);
+            var normalized = new MethodSig(GetRuntimeType(signature.ReturnType.Type),
+                signature.ParamTypes.Select(parameter => new TypeSig(GetRuntimeType(parameter.Type))).ToArray(),
+                header, signature.NumGenericParams, signature.RequiredParameterCount);
+            if (!normalized.Equals(signature)) return new FuncPtrType(normalized);
         }
         return type;
     }

@@ -546,7 +546,8 @@ public partial class FoldReflectionTests
         foreach (string operation in new[] { "GetMethod", "GetProperty", "GetField" }) {
             var resultType = resolver.Import(operation == "GetMethod" ? typeof(MethodInfo) : operation == "GetProperty" ? typeof(PropertyInfo) : typeof(FieldInfo));
             var lookup = typeType.FindMethod(operation, new MethodSig(resultType, [PrimType.String, resolver.Import(typeof(BindingFlags))], true));
-            foreach (string name in new[] { "Field", "field", "StaticField", "ProtectedField", "InternalField", "PrivateField", "Declared", "Answer", "Value", "ChangedType", "PrivateGet", "Virtual", "Hidden", "Overload", "Private", "Absent" }) {
+            foreach (string name in new[] { "Field", "field", "StaticField", "ProtectedField", "InternalField", "PrivateField", "Declared", "Answer", "Value", "ChangedType", "PrivateGet", "Virtual", "Hidden", "Overload", "Private", "Absent",
+                "\u03C2", "\u03C3", "\u03A3", "\u212A", "K", "k", "\u00C5", "\u00E5" }) {
                 foreach (var flags in new[] {
                     BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static,
                     BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static,
