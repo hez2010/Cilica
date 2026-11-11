@@ -5,6 +5,8 @@ using Cilica.IR.Utils;
 
 partial class ReflectionRewriter
 {
+    readonly Dictionary<LocalSlot, StoreInst?> _handleDefinitions = new();
+
     private bool CanTakeMethodAddress(MethodDefOrSpec method, bool allowAbstract = false)
     {
         if (!CanReferenceMethod(method)) return false;
@@ -21,9 +23,7 @@ partial class ReflectionRewriter
 
     private bool FoldMethodHandle(CallInst call, MethodDefOrSpec method)
     {
-        // Instance handles can identify unboxing or virtual entry points whose
-        // receiver convention differs from an ordinary ldftn.
-        if (!method.IsStatic || !CanTakeMethodAddress(method)) return false;
+        if (!_access.CanUseMember(method)) return false;
         call.ReplaceWith(new CilIntrinsic.LoadHandle(_ctx.Module.Resolver, method) { DebugLocation = call.DebugLocation }, insertIfInst: true);
         return true;
     }
@@ -38,9 +38,23 @@ partial class ReflectionRewriter
         return true;
     }
 
-    private static MethodDefOrSpec? GetFunctionPointerTarget(CallInst call)
+    private MethodDefOrSpec? GetFunctionPointerTarget(CallInst call)
     {
         if (!IsFunctionPointerCall(call) || call.Args[0] is not LocalSlot { IsPinned: false, IsHardExposed: false } slot) return null;
+        if (!_handleDefinitions.TryGetValue(slot, out var definition)) {
+            definition = FindHandleDefinition(slot);
+            _handleDefinitions.Add(slot, definition);
+        }
+        if (definition == null || !_order.PrecedesInBlock(definition, call)) return null;
+        return definition.Value switch {
+            CilIntrinsic.LoadHandle { Entity: MethodDefOrSpec method } => method,
+            CallInst handle when IsMethodHandleCall(handle) => _lookups.Resolve(handle.Args[0])?.Member as MethodDefOrSpec,
+            _ => null
+        };
+    }
+
+    private static StoreInst? FindHandleDefinition(LocalSlot slot)
+    {
         StoreInst? definition = null;
         foreach (var (user, operand) in slot.Uses()) {
             if (operand != 0) return null;
@@ -53,12 +67,6 @@ partial class ReflectionRewriter
                 return null;
             }
         }
-        if (definition?.Block != call.Block || definition.Value is not CilIntrinsic.LoadHandle { Entity: MethodDefOrSpec target }) return null;
-        // Local addresses passed to other operations may be mutated. With one
-        // store and only reads, this value is fixed after the store completes.
-        for (var previous = call.Prev; previous != null; previous = previous.Prev) {
-            if (previous == definition) return target;
-        }
-        return null;
+        return definition;
     }
 }

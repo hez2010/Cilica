@@ -3,11 +3,22 @@ namespace Cilica.Analysis;
 using System.Reflection;
 
 /// <summary> Proves reflection type arguments and constraints in the containing generic context. </summary>
-internal sealed class ReflectionTypeFacts(MethodDef caller)
+internal sealed class ReflectionTypeFacts(MethodDef caller, bool allowCrossAssembly = true)
 {
     readonly GenericContext _context = new(caller);
     readonly ModuleResolver _resolver = caller.Module.Resolver;
     public ModuleResolver Resolver => _resolver;
+
+    public bool CanInspect(TypeDefOrSpec type) => allowCrossAssembly || type.Module == caller.Module;
+
+    public bool CanInspectHierarchy(TypeDefOrSpec type)
+    {
+        if (!CanInspect(type)) return false;
+        for (var parent = type.BaseType; parent != null; parent = parent.BaseType) {
+            if (!CanInspect(parent) && !parent.IsCorelibType()) return false;
+        }
+        return true;
+    }
 
     public bool IsNonNull(Value value)
         => value is ConstString || IR.Utils.ConstFolding.FoldCondition(value) == true ||
@@ -31,6 +42,27 @@ internal sealed class ReflectionTypeFacts(MethodDef caller)
     public bool IsBoxable(TypeDesc type)
         => IsRuntimeType(type) && type is not (PointerType or FuncPtrType) &&
             type.Kind is not (TypeKind.Void or TypeKind.TypedRef) && !MayBeByRefLike(type);
+
+    public static bool CanWidenPrimitive(TypeDesc source, TypeDesc target)
+    {
+        if (!source.IsValueType || !target.IsValueType) return false;
+        var to = target.Kind;
+        return source.Kind switch {
+            TypeKind.Bool => to == TypeKind.Bool,
+            TypeKind.Char => to is TypeKind.Char or TypeKind.UInt16 or TypeKind.Int32 or TypeKind.UInt32 or TypeKind.Int64 or TypeKind.UInt64 or TypeKind.Single or TypeKind.Double,
+            TypeKind.SByte => to is TypeKind.SByte or TypeKind.Int16 or TypeKind.Int32 or TypeKind.Int64 or TypeKind.Single or TypeKind.Double,
+            TypeKind.Byte => to is TypeKind.Byte or TypeKind.Char or TypeKind.Int16 or TypeKind.UInt16 or TypeKind.Int32 or TypeKind.UInt32 or TypeKind.Int64 or TypeKind.UInt64 or TypeKind.Single or TypeKind.Double,
+            TypeKind.Int16 => to is TypeKind.Int16 or TypeKind.Int32 or TypeKind.Int64 or TypeKind.Single or TypeKind.Double,
+            TypeKind.UInt16 => to is TypeKind.UInt16 or TypeKind.Int32 or TypeKind.UInt32 or TypeKind.Int64 or TypeKind.UInt64 or TypeKind.Single or TypeKind.Double,
+            TypeKind.Int32 => to is TypeKind.Int32 or TypeKind.Int64 or TypeKind.Single or TypeKind.Double,
+            TypeKind.UInt32 => to is TypeKind.UInt32 or TypeKind.Int64 or TypeKind.UInt64 or TypeKind.Single or TypeKind.Double,
+            TypeKind.Int64 => to is TypeKind.Int64 or TypeKind.Single or TypeKind.Double,
+            TypeKind.UInt64 => to is TypeKind.UInt64 or TypeKind.Single or TypeKind.Double,
+            TypeKind.Single => to is TypeKind.Single or TypeKind.Double,
+            TypeKind.Double => to == TypeKind.Double,
+            _ => false
+        };
+    }
 
     public bool MayBeByRefLike(TypeDesc type)
         => type is GenericParamType parameter ? Resolve(parameter).Attribs.HasFlag(GenericParameterAttributes.AllowByRefLike)
@@ -65,7 +97,7 @@ internal sealed class ReflectionTypeFacts(MethodDef caller)
         for (int i = 0; i < parameters.Count; i++) {
             var parameter = parameters[i];
             var argument = arguments[i];
-            if (!IsRuntimeType(argument) || argument is PointerType or FuncPtrType) return false;
+            if (!IsRuntimeType(argument) || argument is PointerType or FuncPtrType || !CanInspectArgument(argument)) return false;
             if (argument.Kind is TypeKind.Void or TypeKind.TypedRef) return false;
             if (!SatisfiesSpecialConstraints(parameter, argument)) return false;
 
@@ -76,6 +108,16 @@ internal sealed class ReflectionTypeFacts(MethodDef caller)
             }
         }
         return true;
+    }
+
+    public bool CanInspectArgument(TypeDesc type)
+    {
+        if (allowCrossAssembly) return true;
+        return type switch {
+            TypeDefOrSpec nominal => (nominal.IsCorelibType() || CanInspectHierarchy(nominal)) && nominal.GenericParams.All(CanInspectArgument),
+            CompoundType compound => CanInspectArgument(compound.ElemType),
+            _ => true
+        };
     }
 
     private bool SatisfiesSpecialConstraints(GenericParamType parameter, TypeDesc argument)
@@ -114,9 +156,11 @@ internal sealed class ReflectionTypeFacts(MethodDef caller)
         if (target is GenericParamType || target.IsValueType) return false;
 
         source = Normalize(source);
+        if (source is TypeDefOrSpec nominal && !CanInspect(nominal) && !nominal.IsCorelibType()) return false;
         // Closed reference types can also use variance. Signature variables
         // require an exact inherited interface/base instantiation to prove it.
-        if (!source.IsUnboundGeneric && !target.IsUnboundGeneric && source.IsManagedObject() && source.IsAssignableTo(target)) return true;
+        bool inspectHierarchy = allowCrossAssembly || CanInspectArgument(source) && CanInspectArgument(target);
+        if (inspectHierarchy && !source.IsUnboundGeneric && !target.IsUnboundGeneric && source.IsManagedObject() && source.IsAssignableTo(target)) return true;
         return source.Interfaces.Any(type => IsAssignable(type, target, visited)) ||
             source.BaseType is { } parent && IsAssignable(parent, target, visited);
     }

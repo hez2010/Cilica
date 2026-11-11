@@ -121,6 +121,9 @@ public static unsafe class ReflectionDelegateCases
     public static object OpenMutableCache()
         => (s_openCache ??= typeof(Target).GetMethod(nameof(Target.AddInstance))!.CreateDelegate<Func<Target, int, int>>())(new Target(), 2);
 
+    public static int UntypedClosedVirtual()
+        => ((Func<int>)typeof(Base).GetMethod("Read")!.CreateDelegate(typeof(Func<int>), new Target()))();
+
     public static object ClosedVirtual()
         => typeof(Base).GetMethod(nameof(Base.Read))!.CreateDelegate<Func<int>>(new Target())();
 
@@ -165,6 +168,24 @@ public static unsafe class ReflectionDelegateCases
         var action = typeof(Counter).GetMethod(nameof(Counter.Increment))!.CreateDelegate<Func<int, int>>(box);
         action(2);
         return ((Counter)box).Value;
+    }
+
+    public delegate int SpanReader(ref Span<int> value);
+
+    public static int OpenRefStructDelegate()
+    {
+        var callback = typeof(Span<int>).GetProperty("Length")!.GetMethod!.CreateDelegate<SpanReader>();
+        Span<int> value = stackalloc int[42];
+        return callback(ref value);
+    }
+
+    public delegate bool NullableReader(ref int? value);
+
+    public static bool OpenNullableDelegate()
+    {
+        var callback = typeof(int?).GetProperty("HasValue")!.GetMethod!.CreateDelegate<NullableReader>();
+        int? value = 42;
+        return callback(ref value);
     }
 
     public delegate int RefCounter(ref Counter receiver, int value);
@@ -360,6 +381,9 @@ public static unsafe class ReflectionDelegateCases
     public static object FailureReturnsNull()
         => Delegate.CreateDelegate(typeof(Func<string, int>), typeof(Target).GetMethod(nameof(Target.Add))!, false) == null;
 
+    public static int ContravariantSignature()
+        => typeof(Target).GetMethod(nameof(Target.ObjectLength))!.CreateDelegate<Func<string, int>>()("hello");
+
     public static object CovariantSignature()
         => typeof(Target).GetMethod(nameof(Target.Text))!.CreateDelegate<Func<object>>()();
 
@@ -435,6 +459,8 @@ public static unsafe class ReflectionDelegateCases
         public static int Prefix(string? text, int value) => (text?.Length ?? 0) + value;
         public static bool IsMissing(object value) => ReferenceEquals(value, Type.Missing);
         public static void Fail() => throw new InvalidOperationException("failure");
+        public static int ObjectLength(object value) => ((string)value).Length;
+
         public static string Text() => "hello";
         public static T Generic<T>(T value) => value;
         public static void Increment(ref int value) => value++;

@@ -2,6 +2,7 @@ namespace Cilica.Tests.Passes;
 
 using System.Reflection;
 using Cilica.AsmIO;
+using Cilica.CodeGen.Cil;
 using Cilica.IR;
 using Cilica.IR.Utils;
 using Cilica.Passes;
@@ -21,6 +22,9 @@ public partial class FoldReflectionTests
     [InlineData("ExcludedFieldIsNull")]
     [InlineData("MissingAccessorIsNull")]
     [InlineData("ExcludedAccessorIsNull")]
+    [InlineData("InheritedPrivateAccessor")]
+
+    [InlineData("LiteralNull")]
     public void ProvenLookupNullnessFoldsWithoutAMemberAccess(string name)
     {
         foreach (bool defaultPipeline in new[] { false, true }) {
@@ -82,6 +86,7 @@ public partial class FoldReflectionTests
     [InlineData("AmbiguousLookupNullCheck", "ambiguous")]
     [InlineData("InheritedLookupNullCheck", true)]
     [InlineData("LookupResultInCatch", true)]
+    [InlineData("VoidPropertyLookup", true)]
     public void LookupFactsPreserveMetadataEffectsAndExceptions(string name, object? expected)
     {
         using var test = new Case(name);
@@ -152,47 +157,86 @@ public partial class FoldReflectionTests
     [InlineData("InitializedField", 42)]
     [InlineData("InitializedMethod", 42)]
     [InlineData("ThrowingInitializer", "TypeInitializationException")]
+    [InlineData("ArgumentsUsedAfterInvocation", 43)]
+    [InlineData("PrimitiveConversion", 42L)]
+    [InlineData("NullValueArgument", 0)]
+    [InlineData("IndexedProperty", 42)]
+    [InlineData("RefArgument", 42)]
+    [InlineData("BinderArgument", 42)]
+    [InlineData("WideFieldStore", 42L)]
+    [InlineData("InheritedMember", 9)]
+    [InlineData("IgnoreCaseLookup", 7)]
+    [InlineData("InstanceFieldInitialization", 142)]
+    [InlineData("InstanceFieldReadInitialization", 1)]
+    [InlineData("FailedInstanceField", "TargetInvocationException:TypeInitializationException")]
+    [InlineData("FailedStaticFieldRead", "TargetInvocationException:TypeInitializationException")]
+    [InlineData("FailedStaticFieldStore", "TargetInvocationException:TypeInitializationException")]
+    [InlineData("PreparedArrays", 42)]
+    [InlineData("UnsignedWidening", 4294967295L)]
+    [InlineData("UnsignedFloatingWidening", true)]
+    [InlineData("NullableValue", 42)]
+    [InlineData("NullableNull", true)]
+    [InlineData("NullStructArgumentInitialization", 1)]
+    [InlineData("RefAndOutCopyBack", "42:updated")]
+    [InlineData("RefNullableCopyBack", 42)]
+    [InlineData("RefValueCopiesBox", true)]
+    [InlineData("NullableArgumentCopiesBox", true)]
+    [InlineData("WideningKeepsOriginalBox", true)]
+    [InlineData("RefReturnValue", 42)]
+    [InlineData("RefReturnReference", "hello")]
+    [InlineData("NullRefReturn", "NullReferenceException")]
+    [InlineData("InheritedGenericField", 42)]
+    [InlineData("InheritedGenericProperty", 42)]
+    [InlineData("InheritedMethod", 42)]
+    [InlineData("HiddenMethod", 42)]
+    [InlineData("FlattenedField", 42)]
+    [InlineData("SignatureLookup", 42)]
+    [InlineData("WideningSignatureLookup", 42L)]
+    [InlineData("PropertyTypeLookup", 42)]
+    [InlineData("InterfaceConstant", 42)]
+    [InlineData("LiteralString", "hello")]
+    [InlineData("IndexedSetter", 42)]
+    [InlineData("WideIntegerStore", 0x123456789ABCDEF0L)]
+    [InlineData("WideFloatingStore", 12345.6789012345)]
+    [InlineData("CompatibleBinder", 42)]
+    [InlineData("LiteralStringIdentity", false)]
     public void KnownAccessesUseDirectOperationsAndPreserveBehavior(string name, object expected)
     {
-        using var test = new Case(name);
-        Assert.Equal(expected, test.Original.Invoke(null, null));
+        foreach (bool defaultPipeline in new[] { false, true }) {
+            using var test = new Case(name);
+            Assert.Equal(expected, test.Original.Invoke(null, null));
 
-        test.Optimize();
+            test.Optimize(defaultPipeline: defaultPipeline);
 
-        Assert.DoesNotContain(test.Method.ILBody!.Instructions, instruction => IsReflectionAccess(instruction.Operand));
-        Assert.DoesNotContain(test.Method.ILBody.Instructions, instruction => instruction.Operand is MethodDesc method &&
-            method.DeclaringType.IsCorelibType(typeof(Type)) && method.Name is "GetField" or "GetMethod" or "GetProperty");
-        Assert.Equal(expected, test.Emit().Invoke(null, null));
+            Assert.DoesNotContain(test.Method.ILBody!.Instructions, instruction => IsReflectionAccess(instruction.Operand));
+            Assert.DoesNotContain(test.Method.ILBody.Instructions, instruction => instruction.Operand is MethodDesc method &&
+                method.DeclaringType.IsCorelibType(typeof(Type)) && method.Name is "GetField" or "GetMethod" or "GetProperty");
+            Assert.Equal(expected, test.Emit().Invoke(null, null));
+        }
     }
 
     [Theory]
     [InlineData("EscapedArguments", 42)]
-    [InlineData("ArgumentsUsedAfterInvocation", 43)]
-    [InlineData("PrimitiveConversion", 42L)]
-    [InlineData("NullValueArgument", 0)]
     [InlineData("WrongArgumentCount", "TargetParameterCountException")]
     [InlineData("InvalidFieldValue", "ArgumentException")]
-    [InlineData("IndexedProperty", 42)]
     [InlineData("GenericMethodDefinition", "InvalidOperationException")]
-    [InlineData("RefArgument", 42)]
-    [InlineData("BinderArgument", 42)]
     [InlineData("MissingOptionalArgument", "default")]
-    [InlineData("WideFieldStore", 42L)]
-    [InlineData("InheritedMember", 9)]
-    [InlineData("IgnoreCaseLookup", 7)]
     [InlineData("AmbiguousLookup", "AmbiguousMatchException")]
     [InlineData("MissingMember", "NullReferenceException")]
     [InlineData("ReadonlyStore", "FieldAccessException")]
     [InlineData("OpenGeneric", "InvalidOperationException")]
     [InlineData("InvocationInsideFilter", 42)]
     [InlineData("PropertyInsideFilter", 42)]
+    [InlineData("RequiredBinder", "binder")]
     public void UnsupportedAccessesRetainReflectionBehavior(string name, object expected)
     {
-        using var test = new Case(name);
-        Assert.Equal(expected, test.Original.Invoke(null, null));
-        test.Optimize();
-        Assert.Contains(test.Method.ILBody!.Instructions, instruction => IsReflectionAccess(instruction.Operand));
-        Assert.Equal(expected, test.Emit().Invoke(null, null));
+        foreach (bool defaultPipeline in new[] { false, true }) {
+            using var test = new Case(name);
+            Assert.Equal(expected, test.Original.Invoke(null, null));
+            test.Optimize(defaultPipeline: defaultPipeline);
+            Assert.Contains(test.Method.ILBody!.Instructions, instruction => IsReflectionAccess(instruction.Operand));
+            Assert.Equal(expected, test.Emit().Invoke(null, null));
+        }
     }
 
     [Fact]
@@ -246,17 +290,6 @@ public partial class FoldReflectionTests
     }
 
     [Theory]
-    [InlineData("InvocationInsideFilter")]
-    [InlineData("PropertyInsideFilter")]
-    public void DefaultPipelinePreservesWrappingInsideFilters(string name)
-    {
-        using var test = new Case(name);
-        test.Optimize(defaultPipeline: true);
-        Assert.Contains(test.Method.ILBody!.Instructions, instruction => IsReflectionAccess(instruction.Operand));
-        Assert.Equal(42, test.Emit().Invoke(null, null));
-    }
-
-    [Theory]
     [InlineData("FieldInitializationMutatesArgument", false)]
     [InlineData("FieldInitializationMutatesArgument", true)]
     [InlineData("MethodInitializationMutatesArgument", false)]
@@ -290,26 +323,13 @@ public partial class FoldReflectionTests
         Assert.Equal(42, test.Emit().Invoke(null, null));
     }
 
-    [Theory]
-    [InlineData("Fields", 42)]
-    [InlineData("MethodArguments", 42)]
-    [InlineData("BoxedStructFields", 42)]
-    [InlineData("BoxedStructMethod", 1)]
-    [InlineData("WrappedException", "InvalidOperationException")]
-    [InlineData("Properties", 42)]
-    [InlineData("ClosedGeneric", 42)]
-    [InlineData("ReflectionExceptionFilter", 111)]
-    [InlineData("InvocationInsideFinally", 52)]
-    [InlineData("ThrowingInitializer", "TypeInitializationException")]
-    [InlineData("FieldBoxIdentity", true)]
-    [InlineData("ThroughHelper", 7)]
-    [InlineData("UnwrappedInvocationInsideFilter", 42)]
-    public void DefaultPipelineFoldsReflectionIncludingInlinedLookups(string name, object expected)
+    [Fact]
+    public void DefaultPipelineFoldsReflectionIncludingInlinedLookups()
     {
-        using var test = new Case(name);
+        using var test = new Case("ThroughHelper");
         test.Optimize(defaultPipeline: true);
         Assert.DoesNotContain(test.Method.ILBody!.Instructions, instruction => IsReflectionAccess(instruction.Operand));
-        Assert.Equal(expected, test.Emit().Invoke(null, null));
+        Assert.Equal(7, test.Emit().Invoke(null, null));
     }
 
     [Theory]
@@ -482,6 +502,79 @@ public partial class FoldReflectionTests
         Assert.DoesNotContain(body.Instructions().OfType<CallInst>(), call => call.Method.Name is "GetMethod" or "CreateDelegate");
         Assert.Equal(count * (count + 1) / 2, Utils.Compile<Func<int>>(body)());
     }
+
+    [Fact]
+    public void EnumLiteralsKeepTheirBoxedTypeAndUnsignedBits()
+    {
+        using var test = new Case("LiteralEnum");
+        test.Optimize(defaultPipeline: true);
+        var value = test.Emit().Invoke(null, null)!;
+        Assert.True(value.GetType().IsEnum);
+        Assert.Equal(ulong.MaxValue, Convert.ToUInt64(value));
+        Assert.DoesNotContain(test.Method.ILBody!.Instructions, instruction => IsReflectionAccess(instruction.Operand));
+    }
+
+    [Fact]
+    public void NamedLookupFactsMatchRuntimeBindingRules()
+    {
+        using var resolver = new ModuleResolver();
+        resolver.AddTrustedSearchPaths();
+        string path = Path.Combine(AppContext.BaseDirectory, "TestAsm.dll");
+        var runtimeType = Assembly.LoadFrom(path).GetType("ReflectionCases+LookupDerived")!;
+        var type = resolver.Load(path).FindType(null, "ReflectionCases")!.NestedTypes.Single(type => type.Name == "LookupDerived");
+        var typeType = resolver.Import(typeof(Type));
+        var module = resolver.Create("LookupResults_" + Guid.NewGuid().ToString("N"));
+        var owner = module.CreateType(null, "LookupResults");
+        var compilation = new Compilation(module, new VoidLogger(), new() { VerifyEachPass = true });
+        var checks = new List<(string Description, object Expected, MethodDef Method)>();
+        foreach (string operation in new[] { "GetMethod", "GetProperty", "GetField" }) {
+            var resultType = resolver.Import(operation == "GetMethod" ? typeof(MethodInfo) : operation == "GetProperty" ? typeof(PropertyInfo) : typeof(FieldInfo));
+            var lookup = typeType.FindMethod(operation, new MethodSig(resultType, [PrimType.String, resolver.Import(typeof(BindingFlags))], true));
+            foreach (string name in new[] { "Field", "field", "StaticField", "ProtectedField", "InternalField", "PrivateField", "Declared", "Answer", "Value", "ChangedType", "PrivateGet", "Virtual", "Hidden", "Overload", "Private", "Absent" }) {
+                foreach (var flags in new[] {
+                    BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static,
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static,
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly,
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.FlattenHierarchy,
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.IgnoreCase | BindingFlags.FlattenHierarchy,
+                    BindingFlags.NonPublic | BindingFlags.Instance,
+                    BindingFlags.Public | BindingFlags.Static
+                }) {
+                    object expected = Outcome(() => (operation switch {
+                        "GetMethod" => (MemberInfo?)runtimeType.GetMethod(name, flags),
+                        "GetProperty" => runtimeType.GetProperty(name, flags),
+                        _ => runtimeType.GetField(name, flags)
+                    }) == null);
+                    var method = owner.CreateMethod("Run" + checks.Count, PrimType.Bool, [], MethodAttributes.Public | MethodAttributes.Static);
+                    var body = method.Body = new MethodBody(method);
+                    var builder = new IRBuilder(body.CreateBlock());
+                    var reflected = builder.CreateCall(typeType.FindMethod("GetTypeFromHandle"), builder.Emit(new CilIntrinsic.LoadHandle(resolver, type)));
+                    var member = builder.CreateCallVirt(lookup, reflected, ConstString.Create(name), ConstInt.CreateI((int)flags));
+                    builder.CreateReturn(builder.CreateCmp(CompareOp.Eq, member, ConstNull.Create()));
+                    var context = new MethodTransformContext(compilation, body);
+                    PassRunner.Run(new FoldReflection(), context);
+                    PassRunner.Run(new SimplifyInsts(resolver), context);
+                    PassRunner.Run(new DeadCodeElim(), context);
+                    method.ILBody = ILGenerator.GenerateCode(body);
+                    checks.Add(($"{operation}({name}, {flags})", expected, method));
+                }
+            }
+        }
+        using var image = new MemoryStream();
+        module.Save(image, null, module.ModName);
+        var compiled = Assembly.Load(image.ToArray()).GetType("LookupResults")!;
+        foreach (var check in checks) {
+            object actual = Outcome(compiled.GetMethod(check.Method.Name)!.CreateDelegate<Func<bool>>());
+            Assert.True(Equals(check.Expected, actual), $"{check.Description}: expected {check.Expected}, got {actual}");
+        }
+
+        static object Outcome(Func<bool> action)
+        {
+            try { return action(); }
+            catch (Exception e) { return e.GetType(); }
+        }
+    }
+
 
     private static bool IsAccessorReflection(object? operand)
         => IsReflectionAccess(operand) || IsReflectionFactory(operand) || operand is MethodDesc method &&

@@ -21,6 +21,8 @@ partial class FoldReflectionTests
     [InlineData("OpenVirtualNullKeepsArgumentEffects", "2:NullReferenceException")]
     [InlineData("OpenStruct", 42)]
     [InlineData("OpenVirtualStruct", "42")]
+    [InlineData("OpenRefStructDelegate", 42)]
+    [InlineData("OpenNullableDelegate", true)]
     public void OpenInstanceDelegateInvocationsUseTheirSuppliedReceiver(string name, object expected)
     {
         foreach (bool nativeAot in new[] { false, true }) foreach (bool defaultPipeline in new[] { false, true }) {
@@ -251,6 +253,9 @@ partial class FoldReflectionTests
     [InlineData("FunctionPointerMetadataObserved", "Add:42")]
     [InlineData("NativeImportDelegateCreation", true)]
     [InlineData("NativeImportPointerCreation", true)]
+    [InlineData("CovariantSignature", "hello")]
+    [InlineData("ContravariantSignature", 5)]
+    [InlineData("UntypedClosedVirtual", 42)]
     public void KnownDelegateAndPointerFactoriesPreserveBehavior(string name, object expected)
     {
         foreach (bool defaultPipeline in new[] { false, true }) {
@@ -279,7 +284,6 @@ partial class FoldReflectionTests
     [InlineData("InvalidDelegateType")]
     [InlineData("SignatureMismatch")]
     [InlineData("FailureReturnsNull")]
-    [InlineData("CovariantSignature")]
     [InlineData("OpenWithNonNullTarget")]
     [InlineData("BoundValueArgument")]
     [InlineData("OpenDelegateType")]

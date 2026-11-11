@@ -19,12 +19,10 @@ partial class ReflectionRewriter
                 resolver.Import(typeof(BindingFlags)), resolver.Import(typeof(Binder)),
                 PrimType.Object.CreateArray(), resolver.Import(typeof(System.Globalization.CultureInfo)))) return null;
 
-        // A custom binder or culture can change argument conversion. Only the
-        // exception-wrapping flag is compatible with the conversions below.
-        if (call.Args[3] is not ConstNull || call.Args[5] is not ConstNull) return null;
+        // The built-in conversions below do not consult the binder or culture.
+        // Only DoNotWrapExceptions affects these invocations.
         if (call.Args[2] is not ConstInt bits) return null;
         var flags = (BindingFlags)bits.Value;
-        if ((flags & ~BindingFlags.DoNotWrapExceptions) != 0) return null;
         return new(call.Args[4], WrapExceptions: !flags.HasFlag(BindingFlags.DoNotWrapExceptions));
     }
 
@@ -32,68 +30,111 @@ partial class ReflectionRewriter
     {
         if (MatchInvocation(call) is not { } invocation) return false;
         int count = method.ParamSig.Count - (method.IsInstance ? 1 : 0);
-        if (!KnownArray.TryRead(invocation.Array, call, count, out var array)) return false;
-        if (!FoldInvocation(call, method, call.Args[1], array.Values, invocation.WrapExceptions)) return false;
-        array.Remove();
+        if (!KnownArray.TryRead(invocation.Array, call, count, _order, out var array)) return false;
+        if (!FoldInvocation(call, method, call.Args[1], array.Values, invocation.WrapExceptions, array.IsObserved ? invocation.Array : null)) return false;
+        array.RemoveIfUnobserved();
         return true;
     }
 
-    private bool FoldProperty(CallInst call, PropertyDef property, TypeDefOrSpec reflectedType)
+    private bool FoldProperty(CallInst call, ReflectionLookup.Result resolved)
     {
+        var property = (PropertyDef)resolved.Member!;
         bool load = Matches(call, typeof(PropertyInfo), "GetValue", PrimType.Object, PrimType.Object) ||
             Matches(call, typeof(PropertyInfo), "GetValue", PrimType.Object, PrimType.Object, PrimType.Object.CreateArray());
         bool store = Matches(call, typeof(PropertyInfo), "SetValue", PrimType.Void, PrimType.Object, PrimType.Object) ||
             Matches(call, typeof(PropertyInfo), "SetValue", PrimType.Void, PrimType.Object, PrimType.Object, PrimType.Object.CreateArray());
-        if ((!load && !store) || property.Sig.ParamTypes.Count != 0) return false;
+        if (!load && !store) return false;
 
-        var accessor = (load ? property.Getter : property.Setter)?.GetSpec(new GenericContext(reflectedType));
-        if (accessor == null) return false;
+        if (_lookups.ResolvePropertyAccessor(resolved, setter: store)?.Member is not MethodDefOrSpec accessor) return false;
 
-        KnownArray? index = null;
         bool hasIndexArgument = call.NumArgs == (load ? 3 : 4);
-        if (hasIndexArgument && !KnownArray.TryRead(call.Args[^1], call, 0, out index)) return false;
-        if (!FoldInvocation(call, accessor, call.Args[1], load ? [] : [call.Args[2]], wrapExceptions: true)) return false;
-        index?.Remove();
+        if (!KnownArray.TryRead(hasIndexArgument ? call.Args[^1] : ConstNull.Create(), call, property.Sig.ParamTypes.Count, _order, out var index)) return false;
+        if (accessor.ParamSig.Skip(accessor.IsInstance ? 1 : 0).Any(parameter => parameter.Type is ByrefType)) return false;
+        // Property accessors receive a separate argument array. Their conversions
+        // do not copy values back to the caller's index array.
+        if (!FoldInvocation(call, accessor, call.Args[1], load ? index.Values : [..index.Values, call.Args[2]], wrapExceptions: true)) return false;
+        index.RemoveIfUnobserved();
         return true;
     }
 
-    private bool FoldInvocation(CallInst reflection, MethodDefOrSpec method, Value receiver, Value[] values, bool wrapExceptions)
+    private bool FoldInvocation(CallInst reflection, MethodDefOrSpec method, Value receiver, Value[] values, bool wrapExceptions, Value? observedArray = null)
     {
-        if (!CanReferenceMethod(method) || !CanInvokeSignature(method)) return false;
-        if (method.IsInstance && !CanUseReceiver(receiver, method.DeclaringType)) return false;
+        if (!CanInvokeWithArguments(method, receiver, values)) return false;
         if (wrapExceptions && !CanWrapInvocation(reflection)) return false;
 
-        int offset = method.IsInstance ? 1 : 0;
-        if (values.Length != method.ParamSig.Count - offset) return false;
-        for (int i = 0; i < values.Length; i++) {
-            if (!CanConvert(values[i], method.ParamSig[i + offset].Type) || !IsOrdinaryArgument(values[i])) return false;
-        }
-
-        // Receiver and argument conversion precede the protected invocation;
-        // reflection does not wrap errors raised while preparing the call.
+        // Reflection does not wrap errors raised while preparing the arguments.
         var builder = BuilderBefore(reflection);
-        var arguments = new Value[method.ParamSig.Count];
-        if (method.IsInstance) arguments[0] = ConvertReceiver(builder, receiver, method.DeclaringType);
-        for (int i = 0; i < values.Length; i++) {
-            arguments[i + offset] = ConvertArgument(builder, values[i], method.ParamSig[i + offset].Type);
-        }
-
+        var arguments = PrepareInvocationArguments(builder, method, receiver, values);
         var continuation = wrapExceptions ? CreateExceptionWrapper(builder, reflection) : null;
         var direct = builder.Emit(new CallInst(method, arguments, isVirtual: method.IsInstance && !method.DeclaringType.IsValueType) {
             InBounds = true,
             DebugLocation = reflection.DebugLocation
         });
-        var result = method.ReturnType == PrimType.Void ? ConstNull.Create() : BoxResult(builder, direct);
-        if (continuation != null) builder.Emit(new LeaveInst(continuation));
+        var value = method.ReturnType is ByrefType ? builder.CreateLoad(direct) : (Value)direct;
+        var result = method.ReturnType == PrimType.Void ? ConstNull.Create() : BoxResult(builder, value);
+        if (continuation != null) EndExceptionWrapper(builder, reflection, continuation);
+
+        // Argument updates follow a successful invocation and are not wrapped.
+        if (observedArray != null) CopyBackArguments(builder, method, arguments, observedArray);
         if (reflection.ResultType == PrimType.Void) reflection.Remove();
         else reflection.ReplaceWith(result);
         return true;
     }
 
+    private bool CanInvokeWithArguments(MethodDefOrSpec method, Value receiver, Value[] values)
+    {
+        if (!CanReferenceMethod(method) || !CanInvokeSignature(method)) return false;
+        if (!_typeFacts.IsBoxable(method.DeclaringType) || method.DeclaringType.IsCorelibType(typeof(Nullable<>)) || Compilation.IsFrameSensitive(method)) return false;
+        if (method.IsInstance && !CanUseReceiver(receiver, method.DeclaringType)) return false;
+
+        int offset = method.IsInstance ? 1 : 0;
+        if (values.Length != method.ParamSig.Count - offset) return false;
+        for (int i = 0; i < values.Length; i++) {
+            var parameter = method.ParamSig[i + offset].Type;
+            var element = parameter is ByrefType reference ? reference.ElemType : parameter;
+            if (!CanConvert(values[i], element, allowWidening: parameter is not ByrefType) || !IsOrdinaryArgument(values[i])) return false;
+        }
+        return true;
+    }
+
+    private Value[] PrepareInvocationArguments(IRBuilder builder, MethodDefOrSpec method, Value receiver, Value[] values)
+    {
+        int offset = method.IsInstance ? 1 : 0;
+        var arguments = new Value[method.ParamSig.Count];
+        if (method.IsInstance) arguments[0] = ConvertReceiver(builder, receiver, method.DeclaringType);
+        for (int i = 0; i < values.Length; i++) {
+            var parameter = method.ParamSig[i + offset].Type;
+            if (parameter is ByrefType reference) {
+                // Each byref argument owns a copy, even when input boxes alias.
+                var slot = _ctx.Method.CreateVar(reference.ElemType);
+                builder.CreateStore(slot, ConvertArgument(builder, values[i], reference.ElemType));
+                arguments[i + offset] = slot;
+            } else {
+                arguments[i + offset] = ConvertArgument(builder, values[i], parameter);
+            }
+        }
+        return arguments;
+    }
+
+    private static void CopyBackArguments(IRBuilder builder, MethodDefOrSpec method, Value[] arguments, Value array)
+    {
+        int offset = method.IsInstance ? 1 : 0;
+        for (int i = offset; i < arguments.Length; i++) {
+            var parameter = method.ParamSig[i].Type;
+            Value value;
+            if (parameter is ByrefType) value = builder.CreateLoad(arguments[i]);
+            else if (parameter.IsCorelibType(typeof(Nullable<>))) value = arguments[i];
+            else continue;
+            builder.CreateArrayStore(array, ConstInt.CreateI(i - offset), BoxResult(builder, value), inBounds: true);
+        }
+    }
+
     private bool CanInvokeSignature(MethodDefOrSpec method)
     {
         if (method.Definition.HasCustomAttrib("System.Runtime.InteropServices", "UnmanagedCallersOnlyAttribute")) return false;
-        if (method.ReturnType != PrimType.Void && !_types.IsBoxable(method.ReturnType)) return false;
+        var resultType = method.ReturnType is ByrefType reference ? reference.ElemType : method.ReturnType;
+        if (resultType != PrimType.Void && !_typeFacts.IsBoxable(resultType)) return false;
+        if (method.ReturnType is ByrefType && resultType == PrimType.Void) return false;
         int offset = method.IsInstance ? 1 : 0;
         return !method.ReturnSig.HasModifiers && !method.ParamSig.Skip(offset).Any(sig => sig.HasModifiers);
     }
@@ -103,10 +144,10 @@ partial class ReflectionRewriter
         // A catch in this module must see non-Exception throws as reflection's catch does.
         if (_ctx.Compilation.WrapsNonExceptions(_ctx.Module) != _ctx.Compilation.WrapsNonExceptions(_ctx.Module.Resolver.CoreLib)) return false;
         // CIL exception filters cannot contain a nested try/catch.
-        return !_ctx.GetAnalysis<ProtectedRegionAnalysis>().GetBlockRegion(reflection.Block).IsFilter;
+        return !_filterCalls.Contains(reflection);
     }
 
-    private BasicBlock CreateExceptionWrapper(IRBuilder builder, CallInst reflection)
+    private BasicBlock CreateExceptionWrapper(IRBuilder builder, CallInst reflection, TypeDesc? catchType = null)
     {
         var previous = reflection.Block;
         var continuation = previous.Split(reflection);
@@ -115,7 +156,7 @@ partial class ReflectionRewriter
         previous.SetBranch(body);
 
         var exceptionType = _ctx.Module.Resolver.Import(typeof(Exception));
-        var guard = new GuardInst(GuardKind.Catch, handler, exceptionType);
+        var guard = new GuardInst(GuardKind.Catch, handler, catchType ?? exceptionType);
         body.InsertFirst(guard);
         var caught = new IRBuilder(handler);
         var constructor = _ctx.Module.Resolver.Import(typeof(TargetInvocationException))
@@ -126,12 +167,18 @@ partial class ReflectionRewriter
         return continuation;
     }
 
+    private static void EndExceptionWrapper(IRBuilder builder, CallInst reflection, BasicBlock continuation)
+    {
+        builder.Emit(new LeaveInst(continuation));
+        builder.SetPosition(reflection, InsertionDir.Before);
+    }
+
     private bool IsOrdinaryArgument(Value value)
     {
         // Invoke substitutes optional defaults for Missing, including object parameters.
         if (value is ConstNull or CilIntrinsic.Box { SourceType.IsValueType: true }) return true;
-        if (value is CilIntrinsic.Box box) return !_types.CanContainMissing(box.SourceType);
-        var missing = _types.Resolver.Import(typeof(Missing));
-        return TypeUtils.HasConcreteType(value) ? value.ResultType != missing : !_types.CanContainMissing(value.ResultType);
+        if (value is CilIntrinsic.Box box) return !_typeFacts.CanContainMissing(box.SourceType);
+        var missing = _typeFacts.Resolver.Import(typeof(Missing));
+        return TypeUtils.HasConcreteType(value) ? value.ResultType != missing : !_typeFacts.CanContainMissing(value.ResultType);
     }
 }

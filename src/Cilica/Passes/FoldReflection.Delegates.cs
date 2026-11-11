@@ -46,12 +46,13 @@ partial class ReflectionRewriter
 
         var delegateType = creation.Type;
         if (!ReflectionTypeFacts.IsRuntimeType(delegateType)) return null;
+        if (!_typeFacts.CanInspectArgument(delegateType)) return null;
         if (delegateType.BaseType?.IsCorelibType(typeof(MulticastDelegate)) != true) return null;
         var invoke = delegateType.FindMethod("Invoke", throwIfNotFound: false);
         var constructor = delegateType.FindMethod(".ctor",
             new MethodSig(PrimType.Void, [PrimType.Object, PrimType.IntPtr], true), throwIfNotFound: false);
         if (invoke == null || constructor == null || !_access.CanUseMember(constructor)) return null;
-        if (invoke.ReturnSig != method.ReturnSig || invoke.CallConv != CallConvention.Managed) return null;
+        if (!CanBindSignature(method.ReturnSig, invoke.ReturnSig) || invoke.CallConv != CallConvention.Managed) return null;
 
         // An open delegate supplies every method argument, including 'this'.
         // A closed delegate captures the method's first argument in its target.
@@ -65,9 +66,15 @@ partial class ReflectionRewriter
         }
 
         int offset = open ? 0 : 1;
-        if (!invoke.ParamSig.Skip(1).SequenceEqual(method.ParamSig.Skip(offset))) return null;
+        for (int i = 0; i < count; i++) {
+            if (!CanBindSignature(invoke.ParamSig[i + 1], method.ParamSig[i + offset])) return null;
+        }
         return new(constructor, open);
     }
+
+    private bool CanBindSignature(TypeSig source, TypeSig target)
+        => source == target || DelegateUtils.IsCompatibleSignature(source, target) &&
+            (_ctx.Compilation.Settings.AllowCrossAssemblyIPO || _typeFacts.IsAssignable(source.Type, target.Type));
 
     private bool CanBindClosedTarget(Value target, MethodDefOrSpec method)
     {
@@ -77,7 +84,7 @@ partial class ReflectionRewriter
             return CanUseReceiver(target, method.DeclaringType);
         }
         var firstParameter = method.ParamSig[0].Type;
-        return _types.IsReferenceType(firstParameter) && CanConvert(target, firstParameter);
+        return _typeFacts.IsReferenceType(firstParameter) && CanConvert(target, firstParameter);
     }
 
     private bool CanConstructOpenInstanceDelegate(MethodDefOrSpec method)
@@ -108,7 +115,7 @@ partial class ReflectionRewriter
     private bool HasPortableDelegateSlot(TypeDesc type)
         // Aggregate layouts and unconstrained value-type variables need target
         // ABI information; their binding must remain a runtime operation.
-        => type is GenericParamType ? _types.IsReferenceType(type)
+        => type is GenericParamType ? _typeFacts.IsReferenceType(type)
             : type.StackType is StackType.Int or StackType.Long or StackType.NInt or StackType.Float or StackType.ByRef or StackType.Object;
 
     private bool CanDiscardDelegateBinding(TypeDefOrSpec delegateType, MethodDefOrSpec method)
@@ -118,7 +125,7 @@ partial class ReflectionRewriter
         // Keep the factory when those effects may be observable, including for
         // delegate types whose initializer is marked BeforeFieldInit.
         if (delegateType.Definition.HasStaticConstructor) return false;
-        if (_types.Resolver.SkipModuleInitializers) return true;
+        if (_typeFacts.Resolver.SkipModuleInitializers) return true;
 
         var pending = new Stack<TypeDesc>(method.GenericParams);
         var visited = new HashSet<TypeDesc>(ReferenceEqualityComparer.Instance);
@@ -132,7 +139,7 @@ partial class ReflectionRewriter
                 pending.Push(compound.ElemType);
                 continue;
             }
-            if (type is PrimType primitive) type = primitive.GetDefinition(_types.Resolver);
+            if (type is PrimType primitive) type = primitive.GetDefinition(_typeFacts.Resolver);
             if (type is not TypeDefOrSpec nominal) continue;
             if (nominal.RequiresModuleInitialization()) return false;
             foreach (var argument in nominal.GenericParams) pending.Push(argument);
@@ -148,11 +155,12 @@ partial class ReflectionRewriter
     private bool PreservesDelegateIdentity(CallInst factory, DelegateCreation creation, MethodDefOrSpec method)
     {
         // Invoke and null checks cannot observe which MethodInfo the delegate exposes.
-        if (factory.Uses().All(use => use.OperIndex == 0 &&
-            (use.Parent is CilIntrinsic.NullCheck || MatchDelegateInvocation(use.Parent, creation.Type) != null))) return true;
+        if (DelegateValues(factory, creation.Type).All(value => value.Uses().All(use => use.OperIndex == 0 &&
+            (use.Parent is CilIntrinsic.NullCheck || IsDelegateCast(use.Parent, creation.Type) ||
+                MatchDelegateInvocation(use.Parent, creation.Type) != null)))) return true;
 
         var receiverType = Devirtualize.ExactType(creation.Target);
-        if (receiverType is PrimType primitive) receiverType = primitive.GetDefinition(_types.Resolver);
+        if (receiverType is PrimType primitive) receiverType = primitive.GetDefinition(_typeFacts.Resolver);
         if (receiverType is not TypeDefOrSpec exactType) return false;
         if (method.DeclaringType.IsInterface && TypeUtils.CanHaveDynamicInterfaces(exactType)) return false;
 
@@ -165,20 +173,12 @@ partial class ReflectionRewriter
     {
         bool changed = bindingIsValid && !factory.ResultIsNonNull;
         if (bindingIsValid) factory.ResultIsNonNull = true;
-        var pending = new Stack<Instruction>();
-        var visited = new HashSet<Instruction>();
+        var values = DelegateValues(factory, delegateType).ToArray();
         var casts = new List<Instruction>();
-        pending.Push(factory);
-        while (pending.TryPop(out var value)) {
-            if (!visited.Add(value)) continue;
+        foreach (var value in values) {
+            if (value != factory) casts.Add(value);
             foreach (var (user, operand) in value.Uses().AsEnumerable().ToArray()) {
                 if (operand != 0) continue;
-                if (user is CilIntrinsic.CastClass or CilIntrinsic.RefCast or CilIntrinsic.AsInstance &&
-                    user.ResultType == delegateType) {
-                    pending.Push(user);
-                    casts.Add(user);
-                    continue;
-                }
                 if (bindingIsValid && user is CilIntrinsic.NullCheck) {
                     user.Remove();
                     changed = true;
@@ -205,6 +205,23 @@ partial class ReflectionRewriter
             }
         }
         return changed;
+    }
+
+    private static bool IsDelegateCast(Instruction value, TypeDefOrSpec delegateType)
+        => value is CilIntrinsic.CastClass or CilIntrinsic.RefCast or CilIntrinsic.AsInstance && value.ResultType == delegateType;
+
+    private static IEnumerable<Instruction> DelegateValues(Instruction factory, TypeDefOrSpec delegateType)
+    {
+        var pending = new Stack<Instruction>();
+        var visited = new HashSet<Instruction>();
+        pending.Push(factory);
+        while (pending.TryPop(out var value)) {
+            if (!visited.Add(value)) continue;
+            yield return value;
+            foreach (var (user, operand) in value.Uses()) {
+                if (operand == 0 && IsDelegateCast(user, delegateType)) pending.Push(user);
+            }
+        }
     }
 
     private static CallInst? MatchDelegateInvocation(Instruction instruction, TypeDefOrSpec delegateType)

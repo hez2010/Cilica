@@ -32,6 +32,7 @@ partial class FoldReflectionTests
     [InlineData("ReferenceConstraint", "hello")]
     [InlineData("ConstructorConstraint", 42)]
     [InlineData("InterfaceConstraint", 42)]
+    [InlineData("GenericArityLookup", 42)]
     public void GenericAndVirtualReflectionPreservesBehavior(string name, object expected)
     {
         foreach (bool defaultPipeline in new[] { false, true }) {
@@ -284,6 +285,24 @@ partial class FoldReflectionTests
         var expected = Assert.Throws<TargetInvocationException>(() => test.Emit().Invoke(null, null)).InnerException!.GetType();
         test.Optimize(defaultPipeline: true);
         Assert.Equal(expected, Assert.Throws<TargetInvocationException>(() => test.Emit().Invoke(null, null)).InnerException!.GetType());
+    }
+
+    [Theory]
+    [InlineData("InstanceHandle", "Owner`1", false, "Read")]
+    [InlineData("OpenOwnerHandle", "Owner`1", true, "Read")]
+    [InlineData("AbstractHandle", "Abstract", false, "Read")]
+    [InlineData("GenericDefinitionHandle", "Target", false, "Echo")]
+    public void MethodHandlesKeepTheirMetadataIdentity(string name, string owner, bool open, string member)
+    {
+        foreach (bool pipeline in new[] { false, true }) {
+            using var test = new Case(name, "ReflectionGenericCases");
+            test.Optimize(defaultPipeline: pipeline);
+            var run = test.Emit();
+            var declaringType = run.DeclaringType!.GetNestedType(owner)!;
+            if (declaringType.IsGenericTypeDefinition && !open) declaringType = declaringType.MakeGenericType(typeof(int));
+            Assert.Equal(declaringType.GetMethod(member)!.MethodHandle, (RuntimeMethodHandle)run.Invoke(null, null)!);
+            Assert.DoesNotContain(test.Method.ILBody!.Instructions, instruction => IsReflectionFactory(instruction.Operand));
+        }
     }
 
     private static bool IsGenericReflection(object? operand)
