@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/tests/">
+    <Project Path="tests/Benchmarks/Benchmarks.csproj" />
+    <Project Path="tests/PracticeTests/PracticeTests.csproj" />
+  </Folder>
+  <Folder Name="/tests/misc/">
+    <Project Path="tests/misc/TestAsm.IL/TestAsm.IL.ilproj" Type="C#" />
+    <Project Path="tests/misc/TestAsm/TestAsm.csproj" />
+  </Folder>
+  <Project Path="src/Cilica.Cli/Cilica.Cli.csproj" />
+  <Project Path="src/Cilica.OptimizerTask/Cilica.OptimizerTask.csproj" />
+  <Project Path="src/Cilica/Cilica.csproj" />
+  <Project Path="tests/Cilica.Tests/Cilica.Tests.csproj" />
+</Solution>
