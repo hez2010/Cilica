@@ -27,7 +27,12 @@ internal sealed partial class ReflectionLookup(ReflectionTypeFacts types, Instru
     {
         if (value is not CallInst call) return null;
         if (_resolvedMembers.TryGetValue(call, out var result)) return result;
-        result = ResolveMember(call);
+        try {
+            result = ResolveMember(call);
+        } catch (NotSupportedException) {
+            // Unsupported metadata signatures make this optional lookup unknown.
+            result = null;
+        }
         _resolvedMembers.Add(call, result);
         if (result != null) _lookupFacts.Add((call, result.Member != null));
         return result;
