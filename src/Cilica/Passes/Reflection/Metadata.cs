@@ -30,7 +30,11 @@ partial class ReflectionRewriter
         var builder = BuilderBefore(call);
         var resolver = _typeFacts.Resolver;
         var factoryOwner = resolver.Import(factoryType);
-        var memberHandle = builder.Emit(new CilIntrinsic.LoadHandle(resolver, resolved.Member!));
+        // The type handle supplies the declaring instantiation. A definition token
+        // keeps generic methods uninstantiated under shared generic runtime lookup.
+        var handleMember = resolved.Member is MethodSpec { IsGeneric: true, IsBoundGeneric: false } definition
+            ? definition.Definition : resolved.Member!;
+        var memberHandle = builder.Emit(new CilIntrinsic.LoadHandle(resolver, handleMember));
         var typeHandle = builder.Emit(new CilIntrinsic.LoadHandle(resolver, resolved.ReflectedType));
         var factory = factoryOwner.FindMethod(factoryName, new MethodSig(factoryOwner, [memberHandle.ResultType, typeHandle.ResultType], false));
         var metadata = builder.CreateCall(factory, memberHandle, typeHandle);

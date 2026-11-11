@@ -952,6 +952,7 @@ public static class ReflectionCases
     public class GenericTarget<T>
     {
         public U Echo<U>(U value) => value;
+        public static Func<U, T?> Factory<U>() => _ => default;
         public T? Value;
         public T? Property { get; set; }
         public T? PrivateSetter { get; private set; }
@@ -1219,4 +1220,11 @@ public static unsafe class ReflectionAccessorCases
     public class AbstractFoo : AbstractBase { public override int Value => 1; }
     public class AbstractBar : AbstractFoo { public override int Value => 2; }
     public struct Counter { public int Value { get; set; } }
+}
+
+public static class ReflectionMetadataCaller<T>
+{
+    public static MethodInfo InstanceDefinition() => typeof(ReflectionCases.GenericTarget<T>).GetMethod("Echo")!;
+    public static MethodInfo StaticDefinition() => typeof(ReflectionCases.GenericTarget<T>).GetMethod("Factory")!;
+    public static MethodInfo InheritedDefinition() => typeof(ReflectionCases.GenericDerived<T>).GetMethod("Echo")!;
 }

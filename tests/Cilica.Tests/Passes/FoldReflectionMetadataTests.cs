@@ -12,6 +12,26 @@ using Cilica.Passes;
 partial class FoldReflectionTests
 {
     [Theory]
+    [InlineData("InstanceDefinition", typeof(int))]
+    [InlineData("InstanceDefinition", typeof(string))]
+    [InlineData("StaticDefinition", typeof(int))]
+    [InlineData("StaticDefinition", typeof(string))]
+    [InlineData("InheritedDefinition", typeof(int))]
+    [InlineData("InheritedDefinition", typeof(string))]
+    public void GenericCallerPreservesReflectedMethodDefinitions(string name, Type argument)
+    {
+        using var test = new Case(name, "ReflectionMetadataCaller`1");
+        var original = test.Original.DeclaringType!.MakeGenericType(argument).GetMethod(name)!;
+        var expected = (MethodInfo)original.Invoke(null, null)!;
+        test.Optimize(defaultPipeline: true);
+        var optimized = test.Emit().DeclaringType!.MakeGenericType(argument).GetMethod(name)!;
+        var actual = (MethodInfo)optimized.Invoke(null, null)!;
+        Assert.True(actual.IsGenericMethodDefinition);
+        AssertMetadata([expected], [actual]);
+        Assert.Equal(expected.MakeGenericMethod(typeof(string)).ToString(), actual.MakeGenericMethod(typeof(string)).ToString());
+    }
+
+    [Theory]
     [InlineData("InlinedDefinitionMetadata")]
     [InlineData("InlinedGenericDefinitionMetadata")]
     public void InlinedMemberMetadataPreservesDefinitionAndConstructedContexts(string name)
