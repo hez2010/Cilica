@@ -17,7 +17,8 @@ partial class ModuleWriter
             body.ExceptionClauses.Length,
             hasSmallExceptionRegions: false, // TODO
             localVariablesSignature: EncodeLocalVars(body.Locals),
-            attributes: body.InitLocals ? MethodBodyAttributes.InitLocals : 0
+            attributes: body.InitLocals ? MethodBodyAttributes.InitLocals : 0,
+            hasDynamicStackAllocation: body.Instructions.Any(inst => inst.OpCode == ILCode.Localloc)
         );
         EncodeInsts(body, new BlobWriter(enc.Instructions));
 

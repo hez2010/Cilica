@@ -12,6 +12,30 @@ using Cilica.Util;
 public class ModuleWriterTests(ModuleResolverFixture fixture)
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void StackAllocationInitializationSurvivesWithoutLocals(bool initialize)
+    {
+        var module = CreateModule();
+        var owner = module.TypeDefs.Single(type => type.Name == "TestMethods");
+        var method = owner.CreateMethod("Allocate", PrimType.Int32, [],
+            System.Reflection.MethodAttributes.Public | System.Reflection.MethodAttributes.Static);
+        var il = new ILAssembler();
+        il.Emit(ILCode.Ldc_I4_4);
+        il.Emit(ILCode.Conv_U);
+        il.Emit(ILCode.Localloc);
+        il.Emit(ILCode.Ldind_I4);
+        il.Emit(ILCode.Ret);
+        method.ILBody = il.Assemble(null, initLocals: initialize);
+        using var output = new MemoryStream();
+        module.Save(output, null, "stackalloc.dll");
+        var assembly = System.Reflection.Assembly.Load(output.ToArray());
+        var reflected = assembly.GetType("TestMethods")!.GetMethod("Allocate")!;
+        Assert.Equal(initialize, reflected.GetMethodBody()!.InitLocals);
+        if (initialize) Assert.Equal(0, reflected.Invoke(null, null));
+    }
+
+    [Theory]
     [InlineData(true)]
     [InlineData(false)]
     public void FieldCustomModifiersRoundTrip(bool required)
