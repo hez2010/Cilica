@@ -13,6 +13,7 @@ public partial class ILGenerator : InstVisitor
     readonly Dictionary<LocalSlot, ILVariable> _slotVars = new();
     readonly Dictionary<Instruction, ILVariable[]> _deadReferences = new();
     readonly Dictionary<BasicBlock, ILLabel> _filterExits = new();
+    readonly Dictionary<Instruction, TypeDesc?> _emittedTypes = new();
 
     BasicBlock? _currBlock, _nextBlock;
     int _blockStartIndex;
@@ -110,8 +111,7 @@ public partial class ILGenerator : InstVisitor
                 StoreResult(inst);
                 if (_deadReferences.TryGetValue(inst, out var dead)) {
                     foreach (var register in dead) {
-                        _asm.Emit(ILCode.Ldnull);
-                        _asm.EmitStore(register);
+                        _asm.EmitClear(register);
                     }
                 }
             }
@@ -124,6 +124,7 @@ public partial class ILGenerator : InstVisitor
             }
         }
 
+        _asm.ReuseStack(_spBuilder);
         return _asm.Assemble(layout, _method.InitLocals);
     }
 
@@ -131,10 +132,35 @@ public partial class ILGenerator : InstVisitor
     {
         if (def.NumUses > 0) {
             var reg = _regAlloc.GetRegister(def);
-            _asm.EmitStore(reg);
+            _asm.EmitStore(reg, def, GetEmittedType(def)?.StackType == reg.Type.StackType);
         } else if (def.HasResult) {
             _asm.Emit(ILCode.Pop); // unused
         }
+    }
+
+    private TypeDesc? GetEmittedType(Instruction inst)
+    {
+        if (_emittedTypes.TryGetValue(inst, out var type)) return type;
+
+        // Leaf expressions have no typed local. Follow their actual output
+        // types when deciding whether a root's store performs a conversion.
+        type = inst switch {
+            BinaryInst binary => GetOperandType(binary.Left) is { } left && GetOperandType(binary.Right) is { } right
+                ? BinaryInst.GetResultType(binary.Op, left, right) : null,
+            UnaryInst unary => GetOperandType(unary.Value),
+            PtrOffsetInst offset => GetOperandType(offset.BasePtr) is { } pointer
+                ? pointer.StackType == StackType.ByRef ? pointer : PrimType.IntPtr : null,
+            SelectInst select => GetOperandType(select.IfTrue) is { } ifTrue && GetOperandType(select.IfFalse) is { } ifFalse &&
+                ifTrue.StackType == ifFalse.StackType ? ifTrue : null,
+            CilIntrinsic.RefCast cast => GetOperandType(cast.Args[0]),
+            _ => inst.ResultType
+        };
+        _emittedTypes.Add(inst, type);
+        return type;
+
+        TypeDesc? GetOperandType(Value value) => value is Instruction definition
+            ? _forest.IsLeaf(definition) ? GetEmittedType(definition) : _regAlloc.GetRegister(definition).Type
+            : value.ResultType;
     }
 
     private ILVariable GetSlotVarMapping(LocalSlot slot)
@@ -185,7 +211,7 @@ public partial class ILGenerator : InstVisitor
                     inst.Accept(this);
                 } else {
                     var reg = _regAlloc.GetRegister(inst);
-                    _asm.EmitLoad(reg);
+                    _asm.EmitLoad(reg, inst);
                 }
                 break;
             }

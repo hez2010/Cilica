@@ -3,7 +3,7 @@
 using EHRegionKind = System.Reflection.Metadata.ExceptionRegionKind;
 
 /// <summary> Helper for building a list of <see cref="ILInstruction"/>s. </summary>
-public class ILAssembler
+public partial class ILAssembler
 {
     ILInstruction[] _insts = new ILInstruction[16];
     int _index = 0;
@@ -23,6 +23,7 @@ public class ILAssembler
         _lastLabelStart = _index;
 
         if (isCatchEntry) {
+            _catchStarts.Add(_index);
             _stackDepth++;
             _maxStackDepth = Math.Max(_maxStackDepth, _stackDepth);
         }
@@ -48,38 +49,46 @@ public class ILAssembler
         }
         _insts[_index++] = new ILInstruction(op, operand);
 
+        UpdateStackDepth(op, operand);
+    }
+
+    private void UpdateStackDepth(ILCode op, object? operand)
+    {
         switch (op) {
-            case ILCode.Calli: {
-                var signature = ((FuncPtrType)operand!).Signature;
-                _stackDepth -= signature.NumCallArgs + 1; // arguments and function pointer
-                _stackDepth += signature.ReturnType.Type != PrimType.Void ? 1 : 0;
-                break;
-            }
-            case ILCode.Call or ILCode.Callvirt or ILCode.Newobj: {
-                var method = (MethodDesc)operand!;
-                _stackDepth -= method.ParamSig.Count;
-                _stackDepth += method.ReturnType != PrimType.Void ? 1 : 0;
-                _stackDepth += (op == ILCode.Newobj) ? 2 : 0; // discount `this` parameter
-                break;
-            }
-            case ILCode.Ldfld or ILCode.Ldflda or ILCode.Stfld: {
-                var field = (FieldDesc)operand!;
-                _stackDepth -= field.IsInstance ? 1 : 0;
-                _stackDepth += (op == ILCode.Stfld) ? -1 : +1;
-                break;
-            }
             case ILCode.Ret or ILCode.Leave or ILCode.Leave_S or ILCode.Throw or ILCode.Rethrow: {
                 _stackDepth = 0;
                 break;
             }
             default: {
-                Debug.Assert(op.GetStackBehaviourPush() != ILStackBehaviour.Varpush);
-                Debug.Assert(op.GetStackBehaviourPop() != ILStackBehaviour.Varpop);
-                _stackDepth += op.GetStackChange();
+                _stackDepth += GetStackChange(new(op, operand));
                 break;
             }
         }
         _maxStackDepth = Math.Max(_maxStackDepth, _stackDepth);
+    }
+
+    private static int GetStackChange(ILInstruction inst)
+    {
+        switch (inst.OpCode) {
+            case ILCode.Calli: {
+                var signature = ((FuncPtrType)inst.Operand!).Signature;
+                return (signature.ReturnType.Type != PrimType.Void ? 1 : 0) - signature.NumCallArgs - 1;
+            }
+            case ILCode.Call or ILCode.Callvirt or ILCode.Newobj: {
+                var method = (MethodDesc)inst.Operand!;
+                // Newobj supplies `this` and pushes the constructed value.
+                return (method.ReturnType != PrimType.Void ? 1 : 0) - method.ParamSig.Count + (inst.OpCode == ILCode.Newobj ? 2 : 0);
+            }
+            case ILCode.Ldfld or ILCode.Ldflda or ILCode.Stfld: {
+                var field = (FieldDesc)inst.Operand!;
+                return (inst.OpCode == ILCode.Stfld ? -1 : 1) - (field.IsInstance ? 1 : 0);
+            }
+            default: {
+                Debug.Assert(inst.OpCode.GetStackBehaviourPush() != ILStackBehaviour.Varpush);
+                Debug.Assert(inst.OpCode.GetStackBehaviourPop() != ILStackBehaviour.Varpop);
+                return inst.OpCode.GetStackChange();
+            }
+        }
     }
 
     public void EmitLoad(Argument arg)
@@ -101,8 +110,15 @@ public class ILAssembler
         if (code == ILCode.Stloc && _index > _lastLabelStart && _insts[_index - 1].OpCode == ILCode.Ldloc && _insts[_index - 1].Operand == var) {
             _index--;
             _stackDepth--;
+            if (_stackLoads.Remove(_index, out var value)) value.StoreIndex = -1;
             return;
         }
+        RecordVariableUse(var);
+        Emit(code, var);
+    }
+
+    private void RecordVariableUse(ILVariable var)
+    {
         // ILVariable.Index above this value is reserved for the use counter
         // This value was choosen based on the fact that encoded var indices are limited to 16-bit.
         const int kCounterStartIdx = ushort.MaxValue + 1;
@@ -114,7 +130,6 @@ public class ILAssembler
             var.Index = kCounterStartIdx;
             _usedVars.Add(var);
         }
-        Emit(code, var);
     }
 
     public void EmitLdcI4(int value)

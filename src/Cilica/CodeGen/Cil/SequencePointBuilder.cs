@@ -31,6 +31,18 @@ public class SequencePointBuilder(MethodDef method)
         }
     }
 
+    internal void RemapIndices(ReadOnlySpan<int> indices)
+    {
+        int count = 0;
+        for (int i = 0; i < _points.Count; i++) {
+            var remapped = _points[i];
+            remapped.Offset = indices[remapped.Offset];
+            if (count > 0 && _points[count - 1].Offset == remapped.Offset) count--;
+            _points[count++] = remapped;
+        }
+        _points.RemoveRange(count, _points.Count - count);
+    }
+
     public MethodDebugSymbols? BuildSymbols(ReadOnlySpan<ILInstruction> insts)
     {
         if (_points.Count == 0) return null;
