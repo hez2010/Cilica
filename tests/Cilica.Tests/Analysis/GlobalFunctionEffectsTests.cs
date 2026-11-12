@@ -29,7 +29,10 @@ public class GlobalFunctionEffectsTests(ModuleResolverFixture fixture)
             builder.CreateReturn();
         }
         var effects = new Compilation(body.Definition.Module, new VoidLogger(), new()).GetAnalysis<GlobalFunctionEffects>();
-        for (int i = 0; i < 100; i++) Assert.True(effects.GetEffects(methods[0]).IsPure);
+        for (int i = 0; i < 100; i++) {
+            Assert.True(effects.GetEffects(methods[0]).IsPure);
+            Thread.Sleep(1);
+        }
         long allocated = GC.GetAllocatedBytesForCurrentThread();
         for (int i = 0; i < 1000; i++) effects.GetEffects(methods[0]);
         allocated = GC.GetAllocatedBytesForCurrentThread() - allocated;
