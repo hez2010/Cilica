@@ -67,7 +67,7 @@ public class FieldDef : FieldDefOrSpec
 
     /// <summary> The field layout offset (e.g. x in [FieldOffset(x)]), or -1 if not available. </summary>
     public int LayoutOffset { get; set; }
-    public bool HasLayoutOffset => (DeclaringType.Attribs & TypeAttributes.ExplicitLayout) != 0;
+    public bool HasLayoutOffset => IsInstance && (DeclaringType.Attribs & TypeAttributes.ExplicitLayout) != 0;
 
     /// <summary> Static field data. Imported fields with an unspecified layout retain the remaining source data; new fields should supply their exact storage size. </summary>
     public byte[]? MappedData { get; set; }

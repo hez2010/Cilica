@@ -2,6 +2,7 @@ namespace Cilica.Tests.AsmIO;
 
 using System.Diagnostics;
 using System.Reflection.Metadata;
+using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
 using Cilica.AsmIO;
 using Cilica.CodeGen.Cil;
@@ -11,6 +12,41 @@ using Cilica.Util;
 [Collection("ModuleResolver")]
 public class ModuleWriterTests(ModuleResolverFixture fixture)
 {
+    [Fact]
+    public void ExplicitLayoutOffsetsApplyOnlyToInstanceFields()
+    {
+        using var directory = new TemporaryDirectory();
+        var module = CreateModule();
+        var type = module.CreateType(null, "Union",
+            System.Reflection.TypeAttributes.Public | System.Reflection.TypeAttributes.ExplicitLayout | System.Reflection.TypeAttributes.Sealed,
+            (TypeDefOrSpec)module.Resolver.Import(typeof(ValueType)));
+        type.CreateField("First", PrimType.Int32, layoutOffset: 0);
+        type.CreateField("Second", PrimType.Int32, layoutOffset: 0);
+        type.CreateField("Counter", PrimType.Int32,
+            System.Reflection.FieldAttributes.Public | System.Reflection.FieldAttributes.Static);
+        var path = Path.Combine(directory.Path, "layout.dll");
+        module.Save(path, savePdb: false);
+
+        for (int pass = 0; pass < 2; pass++) {
+            using (var pe = new PEReader(File.OpenRead(path))) {
+                Assert.Equal(2, pe.GetMetadataReader().GetTableRowCount(TableIndex.FieldLayout));
+            }
+            var reflected = System.Reflection.Assembly.Load(File.ReadAllBytes(path)).GetType("Union")!;
+            var instance = Activator.CreateInstance(reflected)!;
+            reflected.GetField("First")!.SetValue(instance, 42);
+            reflected.GetField("Counter")!.SetValue(null, 17);
+            Assert.Equal(42, reflected.GetField("Second")!.GetValue(instance));
+            Assert.Equal(17, reflected.GetField("Counter")!.GetValue(null));
+
+            using var resolver = new ModuleResolver();
+            resolver.AddTrustedSearchPaths();
+            var rewritten = resolver.Load(path);
+            var next = Path.Combine(directory.Path, "layout" + pass + ".dll");
+            rewritten.Save(next, savePdb: false);
+            path = next;
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
