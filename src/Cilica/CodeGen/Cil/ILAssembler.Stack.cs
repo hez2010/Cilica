@@ -99,25 +99,27 @@ partial class ILAssembler
 
     private bool PreserveLocalLifetimes(StackRewrite[] rewrites)
     {
-        // A cleared reference needs no local when its entire lifetime is on
-        // the stack. Keep clears for registers shared with other lifetimes.
+        // Explicit overwrites and clears delimit GC-local lifetimes, including
+        // registers whose ordinary loads are all replaced by stack reuse.
         var clearStores = _referenceClears.Select(index => index + 1).ToHashSet();
+        var cleared = _referenceClears.Select(index => (ILVariable)_insts[index + 1].Operand!).ToHashSet();
         var used = new HashSet<ILVariable>();
         for (int i = 0; i < _index; i++) {
             if (rewrites[i] == StackRewrite.Keep && !clearStores.Contains(i) && _insts[i].Operand is ILVariable register) used.Add(register);
         }
-        // Overwriting a surviving GC local releases its previous value. Keep
-        // that store with dup so the new value also remains on the stack.
+        // Load retained GC values from their backing local. Duplicating the
+        // producer can create a hidden JIT root that outlives the local's clear.
         var referenceTypes = new Dictionary<TypeDesc, bool>();
         bool expands = false;
         for (int i = 0; i < _index; i++) {
-            if (rewrites[i] != StackRewrite.Remove || _insts[i] is not { OpCode: ILCode.Stloc, Operand: ILVariable register } || !used.Contains(register)) continue;
+            if (rewrites[i] != StackRewrite.Remove || _insts[i] is not { OpCode: ILCode.Stloc, Operand: ILVariable register } || !used.Contains(register) && !cleared.Contains(register)) continue;
             if (!referenceTypes.TryGetValue(register.Type, out bool containsReferences)) {
                 containsReferences = register.Type.IsRefOrContainsRefs() != false;
                 referenceTypes.Add(register.Type, containsReferences);
             }
             if (containsReferences) {
-                rewrites[i] = StackRewrite.DuplicateAndStore;
+                rewrites[i] = StackRewrite.StoreAndLoad;
+                used.Add(register);
                 expands = true;
             }
         }
@@ -145,7 +147,6 @@ partial class ILAssembler
                 _maxStackDepth = Math.Max(_maxStackDepth, _stackDepth);
             }
             if (rewrites[i] == StackRewrite.Remove) continue;
-            if (rewrites[i] == StackRewrite.DuplicateAndStore) Emit(ILCode.Dup);
             var inst = rewrites[i] == StackRewrite.Duplicate ? new ILInstruction(ILCode.Dup) : source[i];
             if (inst.OpCode == ILCode.Ldloc && inst.Operand == topLocal) {
                 inst = new(ILCode.Dup);
@@ -156,13 +157,17 @@ partial class ILAssembler
                 RecordVariableUse(register);
             }
             Emit(inst.OpCode, inst.Operand);
+            if (rewrites[i] == StackRewrite.StoreAndLoad) {
+                topLocal = (ILVariable)inst.Operand!;
+                EmitLoad(topLocal);
+            }
         }
         indices[source.Length] = _index;
         foreach (var label in _labelStarts.Keys) _labelStarts[label] = indices[_labelStarts[label]];
         sequencePoints?.RemapIndices(indices);
     }
 
-    enum StackRewrite : byte { Keep, Remove, Duplicate, DuplicateAndStore }
+    enum StackRewrite : byte { Keep, Remove, Duplicate, StoreAndLoad }
 
     // Disjoint intervals (store, final use], ordered by decreasing start.
     // Reverse definition order permits amortized constant-time union, with

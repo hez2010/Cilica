@@ -1,6 +1,7 @@
 namespace Cilica.Tests.CodeGen;
 
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using Cilica.AsmIO;
 using Cilica.CodeGen.Cil;
 using Cilica.Frontend;
@@ -10,6 +11,52 @@ using Cilica.IR.Utils;
 [Collection("ModuleResolver")]
 public class StackReuseTests(ModuleResolverFixture fixture)
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void StackReusedReferencesAreCollectibleAfterTheirLastUse(bool minimumOptimization)
+    {
+        var factory = fixture.Resolver.Import(typeof(Func<object>));
+        var weakType = fixture.Resolver.Import(typeof(WeakReference));
+        var helpers = fixture.Resolver.Import(typeof(LifetimeProbe));
+        var resultType = fixture.Resolver.Import(typeof(ValueTuple<Type, bool>));
+        var body = Utils.CreateTestMethod(fixture.Resolver, resultType, factory, weakType);
+        body.Definition.ImplAttribs = MethodImplAttributes.NoInlining |
+            (minimumOptimization ? MethodImplAttributes.NoOptimization : 0);
+        var builder = new IRBuilder(body.CreateBlock());
+        var value = builder.CreateCallVirt(factory.FindMethod("Invoke"), body.Args[0]);
+        builder.CreateCall(helpers.FindMethod(nameof(LifetimeProbe.UseReference)), value);
+        var type = builder.CreateCall(fixture.Resolver.Import(typeof(object)).FindMethod("GetType"), value);
+        var collected = builder.CreateCall(helpers.FindMethod(nameof(LifetimeProbe.CollectAfterUse)), type, body.Args[1]);
+        builder.CreateReturn(builder.CreateNewObj(resultType.FindMethod(".ctor"), type, collected));
+
+        var weak = new WeakReference(null);
+        var run = Utils.Compile<Func<Func<object>, WeakReference, (Type, bool)>>(body);
+        var result = run(() => {
+            var value = new object();
+            weak.Target = value;
+            return value;
+        }, weak);
+        Assert.Equal(typeof(object), result.Item1);
+        Assert.True(result.Item2);
+    }
+
+    public static class LifetimeProbe
+    {
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static void UseReference(object value) => GC.KeepAlive(value);
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static bool CollectAfterUse(Type type, WeakReference weak)
+        {
+            Assert.Equal(typeof(object), type);
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            return !weak.IsAlive;
+        }
+    }
+
     [Theory]
     [InlineData(2)]
     [InlineData(3)]
@@ -59,29 +106,6 @@ public class StackReuseTests(ModuleResolverFixture fixture)
         Assert.Equal(2, il.Instructions.Count(inst => inst.OpCode == ILCode.Dup));
         Assert.Equal(4, il.MaxStack);
         Assert.Equal(new[] { 42, 43 }, Utils.Compile<Func<int[]>>(body)());
-    }
-
-    [Theory]
-    [InlineData(1)]
-    [InlineData(2)]
-    public void StackOnlyReferencesDoNotLeaveClearingLocals(int lifetimes)
-    {
-        var body = Utils.CreateTestMethod(fixture.Resolver, PrimType.Void);
-        var builder = new IRBuilder(body.CreateBlock());
-        var keepAlive = fixture.Resolver.Import(typeof(GC)).FindMethod("KeepAlive");
-        for (int i = 0; i < lifetimes; i++) {
-            var value = builder.CreateNewObj(fixture.Resolver.Import(typeof(object)).FindMethod(".ctor"));
-            builder.CreateCall(keepAlive, value);
-            builder.CreateCall(keepAlive, value);
-        }
-        builder.CreateReturn();
-
-        var il = ILGenerator.GenerateCode(body);
-        Assert.Empty(il.Locals);
-        Assert.Equal(lifetimes, il.Instructions.Count(inst => inst.OpCode == ILCode.Dup));
-        Assert.DoesNotContain(il.Instructions, inst => inst.OpCode == ILCode.Ldnull);
-        Assert.Equal(2, il.MaxStack);
-        Utils.Compile<Action>(body)();
     }
 
     [Theory]
