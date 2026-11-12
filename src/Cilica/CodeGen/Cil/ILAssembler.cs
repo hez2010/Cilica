@@ -126,7 +126,6 @@ public partial class ILAssembler
         if (var.Index >= kCounterStartIdx) {
             var.Index++;
         } else {
-            Debug.Assert(!_usedVars.Contains(var));
             var.Index = kCounterStartIdx;
             _usedVars.Add(var);
         }

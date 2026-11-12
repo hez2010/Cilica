@@ -61,23 +61,91 @@ public class StackReuseTests(ModuleResolverFixture fixture)
         Assert.Equal(new[] { 42, 43 }, Utils.Compile<Func<int[]>>(body)());
     }
 
-    [Fact]
-    public void StackOnlyReferencesDoNotLeaveClearingLocals()
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void StackOnlyReferencesDoNotLeaveClearingLocals(int lifetimes)
     {
         var body = Utils.CreateTestMethod(fixture.Resolver, PrimType.Void);
         var builder = new IRBuilder(body.CreateBlock());
-        var value = builder.CreateNewObj(fixture.Resolver.Import(typeof(object)).FindMethod(".ctor"));
         var keepAlive = fixture.Resolver.Import(typeof(GC)).FindMethod("KeepAlive");
-        builder.CreateCall(keepAlive, value);
-        builder.CreateCall(keepAlive, value);
+        for (int i = 0; i < lifetimes; i++) {
+            var value = builder.CreateNewObj(fixture.Resolver.Import(typeof(object)).FindMethod(".ctor"));
+            builder.CreateCall(keepAlive, value);
+            builder.CreateCall(keepAlive, value);
+        }
         builder.CreateReturn();
 
         var il = ILGenerator.GenerateCode(body);
         Assert.Empty(il.Locals);
-        Assert.Single(il.Instructions.Where(inst => inst.OpCode == ILCode.Dup));
+        Assert.Equal(lifetimes, il.Instructions.Count(inst => inst.OpCode == ILCode.Dup));
         Assert.DoesNotContain(il.Instructions, inst => inst.OpCode == ILCode.Ldnull);
         Assert.Equal(2, il.MaxStack);
         Utils.Compile<Action>(body)();
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void ReusingARegisterReleasesThePreviousReference(bool wrapInStruct, bool initLocals)
+    {
+        var references = new List<WeakReference>();
+        TypeDesc valueType = wrapInStruct ? fixture.Resolver.Import(typeof(ValueTuple<object>)) : PrimType.Object;
+        var factory = fixture.Resolver.Import(wrapInStruct ? typeof(Func<ValueTuple<object>>) : typeof(Func<object>));
+        var probe = fixture.Resolver.Import(typeof(Func<bool>));
+        var body = Utils.CreateTestMethod(fixture.Resolver, PrimType.Bool, factory, probe);
+        body.InitLocals = initLocals;
+        body.Definition.ImplAttribs = MethodImplAttributes.NoOptimization | MethodImplAttributes.NoInlining;
+        var entry = body.CreateBlock();
+        var work = body.CreateBlock();
+        var unused = body.CreateBlock();
+        var builder = new IRBuilder(entry);
+        var keepAlive = fixture.Resolver.Import(typeof(GC)).FindMethod("KeepAlive");
+        var referenceEquals = fixture.Resolver.Import(typeof(object)).FindMethod("ReferenceEquals");
+        var a = builder.CreateCallVirt(factory.FindMethod("Invoke"), body.Args[0]);
+        builder.CreateCall(keepAlive, GetObject(builder, a));
+        builder.SetBranch(builder.CreateCall(referenceEquals, ConstNull.Create(), GetObject(builder, a)), unused, work);
+        unused.SetBranch(new ReturnInst(ConstInt.CreateI(0)));
+        builder = new IRBuilder(work);
+        var b = builder.CreateCallVirt(factory.FindMethod("Invoke"), body.Args[0]);
+        builder.CreateCall(keepAlive, GetObject(builder, b));
+        var collected = builder.CreateCallVirt(probe.FindMethod("Invoke"), body.Args[1]);
+        builder.CreateCall(keepAlive, GetObject(builder, b));
+        builder.CreateReturn(collected);
+        var document = new DebugSourceDocument { Name = "StackReuse.cs" };
+        b.DebugLocation = new(document, 1, 1, 1, 20);
+        collected.DebugLocation = new(document, 2, 2, 1, 20);
+        var points = new SequencePointBuilder(body.Definition);
+        var il = ILGenerator.GenerateCode(body, points);
+        Assert.Contains(il.Instructions, inst => inst.OpCode == ILCode.Dup);
+        var probePoint = Assert.Single(points.BuildSymbols(il.Instructions)!.SequencePoints.Where(point => point.StartLine == 2));
+        Assert.Equal(ILCode.Ldarg_1, il.Instructions.Single(inst => inst.Offset == probePoint.Offset).OpCode);
+
+        bool result = wrapInStruct
+            ? Utils.Compile<Func<Func<ValueTuple<object>>, Func<bool>, bool>>(body)(() => new(CreateValue(references)), () => Probe(references))
+            : Utils.Compile<Func<Func<object>, Func<bool>, bool>>(body)(() => CreateValue(references), () => Probe(references));
+        Assert.True(result);
+        Assert.Equal(2, references.Count);
+
+        Value GetObject(IRBuilder target, Value value) => wrapInStruct
+            ? target.Emit(new FieldExtractInst(valueType.FindField("Item1"), value)) : value;
+
+        static object CreateValue(List<WeakReference> references)
+        {
+            var value = new object();
+            references.Add(new WeakReference(value));
+            return value;
+        }
+
+        static bool Probe(List<WeakReference> references)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            return !references[0].IsAlive && references[1].IsAlive;
+        }
     }
 
     [Theory]
@@ -154,6 +222,81 @@ public class StackReuseTests(ModuleResolverFixture fixture)
         var run = Utils.Compile<Func<Func<int>, Func<int>, int>>(body);
         Assert.Equal(6, run(() => { trace.Add("a"); return 3; }, () => { trace.Add("b"); return -7; }));
         Assert.Equal(new[] { "a", "b" }, trace);
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(32)]
+    [InlineData(256)]
+    public void ManyNestedTemporariesPreserveConsumptionOrder(int count)
+    {
+        var callback = fixture.Resolver.Import(typeof(Func<int>));
+        var body = Utils.CreateTestMethod(fixture.Resolver, PrimType.Int32, callback);
+        var (consume, trace) = CreateRecorder(body);
+        var builder = new IRBuilder(body.CreateBlock());
+        var invoke = callback.FindMethod("Invoke");
+        var outer = builder.CreateCallVirt(invoke, body.Args[0]);
+        int expected = 0;
+        for (int group = 0; group < 2; group++) {
+            var values = new Value[count];
+            for (int i = 0; i < count; i++) values[i] = builder.CreateCallVirt(invoke, body.Args[0]);
+            for (int i = count - 1; i >= 0; i--) {
+                for (int use = 0; use < 2; use++) {
+                    builder.CreateCall(consume, values[i]);
+                    expected = unchecked(expected * 31 + group * count + i + 2);
+                }
+            }
+            builder.CreateCall(consume, outer);
+            expected = unchecked(expected * 31 + 1);
+        }
+        builder.CreateReturn(builder.CreateFieldLoad(trace));
+
+        var il = ILGenerator.GenerateCode(body);
+        Assert.Empty(il.Locals);
+        Assert.Equal(count + 2, il.MaxStack);
+        int calls = 0;
+        var run = Utils.Compile<Func<Func<int>, int>>(body);
+        Assert.Equal(expected, run(() => ++calls));
+        Assert.Equal(2 * count + 1, calls);
+    }
+
+    [Fact]
+    public void CrossingTemporariesKeepTheirValues()
+    {
+        var callback = fixture.Resolver.Import(typeof(Func<int>));
+        var body = Utils.CreateTestMethod(fixture.Resolver, PrimType.Int32, callback);
+        var (consume, trace) = CreateRecorder(body);
+        var builder = new IRBuilder(body.CreateBlock());
+        var invoke = callback.FindMethod("Invoke");
+        var a = builder.CreateCallVirt(invoke, body.Args[0]);
+        var b = builder.CreateCallVirt(invoke, body.Args[0]);
+        builder.CreateCall(consume, a);
+        builder.CreateCall(consume, b);
+        builder.CreateCall(consume, b);
+        builder.CreateCall(consume, a);
+        builder.CreateReturn(builder.CreateFieldLoad(trace));
+
+        var il = ILGenerator.GenerateCode(body);
+        Assert.Single(il.Locals);
+        Assert.Single(il.Instructions.Where(inst => inst.OpCode == ILCode.Dup));
+        int calls = 0;
+        var run = Utils.Compile<Func<Func<int>, int>>(body);
+        Assert.Equal(((1 * 31 + 2) * 31 + 2) * 31 + 1, run(() => ++calls));
+        Assert.Equal(2, calls);
+    }
+
+    private static (MethodDef Consume, FieldDef Trace) CreateRecorder(Cilica.IR.MethodBody body)
+    {
+        var owner = body.Definition.DeclaringType;
+        var trace = owner.CreateField("Trace", PrimType.Int32, FieldAttributes.Public | FieldAttributes.Static);
+        var consume = owner.CreateMethod("Consume", PrimType.Void, [new ParamDef(PrimType.Int32, "value")],
+            MethodAttributes.Public | MethodAttributes.Static);
+        consume.Body = new(consume);
+        var builder = new IRBuilder(consume.Body.CreateBlock());
+        var previous = builder.CreateMul(builder.CreateFieldLoad(trace), ConstInt.CreateI(31));
+        builder.CreateFieldStore(trace, null, builder.CreateAdd(previous, consume.Body.Args[0]));
+        builder.CreateReturn();
+        return (consume, trace);
     }
 
     [Fact]

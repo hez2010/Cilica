@@ -244,6 +244,7 @@ public static class TypeUtils
     public static bool? IsRefOrContainsRefs(this TypeDesc type)
     {
         if (type is GenericParamType) return null;
+        if (type.Kind == TypeKind.TypedRef) return true;
         if (type is TypeDefOrSpec { IsValueType: true }) {
             bool unknown = false;
             foreach (var field in type.Fields) {

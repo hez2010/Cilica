@@ -62,6 +62,13 @@ public class TypeTests
     }
 
     [Fact]
+    public void TypedReferencesContainManagedReferences()
+    {
+        Assert.True(PrimType.TypedRef.IsRefOrContainsRefs());
+        Assert.True(_modResolver.Import(typeof(TypedReference)).IsRefOrContainsRefs());
+    }
+
+    [Fact]
     public void ReferenceContainmentPreservesGenericUncertainty()
     {
         var parameter = GenericParamType.GetUnboundT(0);
