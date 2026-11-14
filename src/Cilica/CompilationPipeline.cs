@@ -22,6 +22,8 @@ public static class CompilationPipeline
             .RepeatUntilFixedPoint(3);
         manager.AddPasses().Apply<ValueNumbering>().Apply<AssertionProp>().Apply<PresizeLists>().Apply<LoopStrengthReduction>().IfChanged(simplify);
         manager.AddPasses().Apply<LoopVectorizer>().IfChanged(simplify);
+        // Runs last: a tail call prevents inlining, so every inlining opportunity must be exhausted first.
+        manager.AddPasses().Apply<TailCallOptimization>();
 
         return manager;
     }
