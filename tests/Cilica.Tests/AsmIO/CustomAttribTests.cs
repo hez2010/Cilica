@@ -50,4 +50,83 @@ public class CustomAttribTests
             Assert.Equal(value, prop.Value);
         }
     }
+
+    [Fact]
+    public void SerializeTypeEmitsNestedAndGenericNames()
+    {
+        var module = _modResolver.Resolve("TestAsm");
+
+        var listEnumerator = _modResolver.Import(typeof(List<string>.Enumerator))!;
+        Assert.Equal(
+            "System.Collections.Generic.List`1+Enumerator[[System.String, " + _modResolver.SysTypes.String.Module.AsmName.FullName + "]], " +
+                listEnumerator.Module.AsmName.FullName,
+            CustomAttrib.SerializeType(listEnumerator, module));
+
+        var listOfInt = _modResolver.Import(typeof(List<int>))!;
+        Assert.Equal(
+            "System.Collections.Generic.List`1[[System.Int32, " + _modResolver.SysTypes.Int32.Module.AsmName.FullName + "]], " +
+                listOfInt.Module.AsmName.FullName,
+            CustomAttrib.SerializeType(listOfInt, module));
+    }
+
+    [Fact]
+    public void SerializeTypeOmitsQualifierForOwnModule()
+    {
+        var module = _modResolver.Resolve("TestAsm");
+        var ownType = module.FindType(null, "CustomAttribs")!;
+
+        Assert.Equal("CustomAttribs", CustomAttrib.SerializeType(ownType, module));
+        Assert.Equal("CustomAttribs", CustomAttrib.SerializeType(ownType));
+    }
+
+    [Fact]
+    public void SerializeTypeEmitsCompoundTypes()
+    {
+        var module = _modResolver.Resolve("TestAsm");
+        var int32 = _modResolver.SysTypes.Int32;
+        var corelib = ", " + int32.Module.AsmName.FullName;
+
+        // The assembly qualifier is appended for the top-level type, so compound types inherit it from their element type.
+        Assert.Equal("System.Int32[]" + corelib, CustomAttrib.SerializeType(int32.CreateArray(), module));
+        Assert.Equal("System.Int32[][]" + corelib, CustomAttrib.SerializeType(int32.CreateArray().CreateArray(), module));
+        Assert.Equal("System.Int32&" + corelib, CustomAttrib.SerializeType(int32.CreateByref(), module));
+        Assert.Equal("System.Int32*" + corelib, CustomAttrib.SerializeType(int32.CreatePointer(), module));
+        Assert.Equal("System.Int32[,]" + corelib, CustomAttrib.SerializeType(new MDArrayType(int32, 2, default, default), module));
+
+        // Primitives that are not bound to a TypeDef still serialize to their corelib name.
+        Assert.Equal("System.Int32" + corelib, CustomAttrib.SerializeType(PrimType.Int32, module));
+    }
+
+    [Fact]
+    public void SerializeParseRoundtrip()
+    {
+        var module = _modResolver.Resolve("TestAsm");
+        var int32 = _modResolver.SysTypes.Int32;
+
+        TypeDesc[] types = [
+            _modResolver.Import(typeof(List<string>.Enumerator))!,
+            _modResolver.Import(typeof(List<int>))!,
+            _modResolver.Import(typeof(Dictionary<string, List<byte>>))!,
+            int32.CreateArray(),
+            int32.CreateArray().CreateArray(),
+            int32.CreateByref(),
+            int32.CreatePointer(),
+            int32,
+        ];
+
+        foreach (var type in types) {
+            string name = CustomAttrib.SerializeType(type, module);
+            var parsed = CustomAttrib.ParseSerializedType(module, name);
+            Assert.Equal(type, parsed);
+        }
+    }
+
+    [Fact]
+    public void SerializeTypeRejectsUnrepresentableTypes()
+    {
+        var module = _modResolver.Resolve("TestAsm");
+
+        Assert.Throws<NotSupportedException>(() => CustomAttrib.SerializeType(VectorType.Create(PrimType.Int32, 4), module));
+        Assert.Throws<NotSupportedException>(() => CustomAttrib.SerializeType(GenericParamType.GetUnboundT(0), module));
+    }
 }

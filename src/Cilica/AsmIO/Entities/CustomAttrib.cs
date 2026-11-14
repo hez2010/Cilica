@@ -7,6 +7,9 @@ using ValueArray = ImmutableArray<object?>;
 
 public partial class CustomAttrib
 {
+    // Named argument markers, see ECMA-335 II.23.3.
+    private const byte kField = 0x53, kProp = 0x54;
+
     ValueArray _fixedArgs;
     PropArray _namedArgs;
     
@@ -34,6 +37,14 @@ public partial class CustomAttrib
         }
     }
     public TypeDesc Type => Constructor.DeclaringType;
+
+    /// <summary>
+    /// The module the attribute blob is (or will be) stored in. Used to resolve and emit type names.
+    /// </summary>
+    internal ModuleDef ParentModule
+        => _parentModule
+        ?? (Constructor.DeclaringType as TypeDefOrSpec)?.Module
+        ?? throw new InvalidOperationException("Could not determine the module of the attribute's constructor.");
 
     // Note that this will be called while the method table is still being parsed, so the ctor may be unavailable.
     internal CustomAttrib(ModuleDef parentModule, CustomAttributeHandle handle)

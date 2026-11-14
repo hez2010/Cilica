@@ -45,8 +45,6 @@ partial class CustomAttrib
 
         var builder = ImmutableArray.CreateBuilder<CustomAttribProp>(count);
         for (int i = 0; i < count; i++) {
-            const byte kField = 0x53, kProp = 0x54;
-
             byte memberType = reader.ReadByte();
             if (memberType is not (kField or kProp)) {
                 throw new BadImageFormatException();

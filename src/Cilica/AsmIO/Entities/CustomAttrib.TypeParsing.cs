@@ -1,7 +1,6 @@
 namespace Cilica.AsmIO;
 
 using System.Reflection;
-using System.Text.RegularExpressions;
 
 partial class CustomAttrib
 {
@@ -161,13 +160,21 @@ partial class CustomAttrib
     }
     enum PartKind { DefOrSpec, Nested = '+', Array = '[', Ref = '&', Ptr = '*' }
 
-    public static string SerializeType(TypeDesc type)
+    public static string SerializeType(TypeDesc type) => SerializeType(type, scope: null);
+
+    /// <summary> Serializes a type to the name format used by custom attribute blobs. </summary>
+    /// <param name="scope">
+    /// The module in which the resulting name is going to be resolved. Types that are not defined in this module
+    /// are emitted with an assembly qualifier. When <see langword="null"/>, no assembly qualifier is emitted.
+    /// </param>
+    /// <remarks> The result can be parsed back with <see cref="ParseSerializedType"/>. </remarks>
+    public static string SerializeType(TypeDesc type, ModuleDef? scope)
     {
         var sb = new StringBuilder();
-        Print(type);
+        Print(type, topLevel: true);
         return sb.ToString();
 
-        void Print(TypeDesc type)
+        void Print(TypeDesc type, bool topLevel = false)
         {
             switch (type) {
                 case TypeDef def: {
@@ -183,30 +190,106 @@ partial class CustomAttrib
                 }
                 case TypeSpec spec: {
                     Print(spec.Definition);
-                    Ensure.That(spec.Name.Contains('`'), "Generic type name must end with a backtick followed by the number of generic parameters.");
+                    // The generic arguments belong to the outermost generic type of the declaring type chain,
+                    // so the arity of the whole chain has to match (e.g. "List`1+Enumerator[[System.String]]").
+                    int arity = GetArity(spec.Definition);
+                    if (arity != spec.GenericParams.Count) {
+                        throw new NotSupportedException(
+                            $"Cannot serialize generic type '{spec}': expected {arity} generic arguments but got {spec.GenericParams.Count}.");
+                    }
                     sb.Append('[');
                     for (int i = 0; i < spec.GenericParams.Count; i++) {
                         if (i != 0) sb.Append(',');
-                        Print(spec.GenericParams[i]);
+                        PrintGenericArg(spec.GenericParams[i]);
                     }
                     sb.Append(']');
                     break;
+                }
+                case MDArrayType md: {
+                    Print(md.ElemType);
+                    sb.Append('[');
+                    for (int i = 0; i < md.Rank; i++) {
+                        if (i != 0) sb.Append(',');
+                    }
+                    sb.Append(']');
+                    break;
+                }
+                case VectorType vec: {
+                    // Vectors are an IR-only concept and never appear in metadata.
+                    throw new NotSupportedException($"Cannot serialize vector type '{vec}'.");
                 }
                 case CompoundType compound: {
                     Print(compound.ElemType);
                     sb.Append(type switch { ArrayType => "[]", ByrefType => "&", PointerType => "*" });
                     break;
                 }
-                default: throw new NotSupportedException();
+                case PrimType prim: {
+                    PrintEscaped("System");
+                    sb.Append('.');
+                    PrintEscaped(prim.Name);
+                    break;
+                }
+                case GenericParamType gp: {
+                    throw new NotSupportedException(
+                        $"Cannot serialize generic type parameter '{gp.Name}' because it is not bound to a type.");
+                }
+                default: {
+                    throw new NotSupportedException(
+                        $"Cannot serialize type '{type}' of kind '{type.GetType().Name}'.");
+                }
+            }
+
+            if (topLevel) {
+                PrintAssemblyQualifier(type);
             }
         }
+        void PrintGenericArg(TypeDesc arg)
+        {
+            // Generic arguments that live in another assembly must be bracketed, e.g. "[[System.Int32, System.Private.CoreLib]]".
+            bool qualify = NeedsAssemblyQualifier(arg);
+            if (qualify) sb.Append('[');
+            Print(arg, topLevel: qualify);
+            if (qualify) sb.Append(']');
+        }
+        bool NeedsAssemblyQualifier(TypeDesc type)
+            => scope != null && GetDefiningModule(type) is { } module && module != scope;
+        // The parser accumulates the arity over the whole declaring type chain, so mirror that here.
+        static int GetArity(TypeDef def)
+        {
+            int arity = 0;
+            for (TypeDef? curr = def; curr != null; curr = curr.DeclaringType) {
+                int backtickIdx = curr.Name.LastIndexOf('`');
+                if (backtickIdx >= 0 && int.TryParse(curr.Name.AsSpan(backtickIdx + 1), out int count)) {
+                    arity += count;
+                }
+            }
+            return arity;
+        }
+        void PrintAssemblyQualifier(TypeDesc type)
+        {
+            if (NeedsAssemblyQualifier(type)) {
+                sb.Append(", ").Append(GetDefiningModule(type)!.AsmName.FullName);
+            }
+        }
+        ModuleDef? GetDefiningModule(TypeDesc type)
+            => type switch {
+                TypeDef def => def.Module,
+                TypeSpec spec => spec.Definition.Module,
+                // Primitives are always the core library's System.* types.
+                PrimType when scope != null => scope.Resolver.SysTypes.Int32.Module,
+                CompoundType compound => GetDefiningModule(compound.ElemType),
+                _ => null
+            };
         void PrintEscaped(string str)
         {
-            // Escape rare special characters
-            if (str.AsSpan().IndexOfAny("[],&*+=") >= 0) {
-                str = Regex.Replace(str, @"[\[\]\,\&\*\+\=]", @"\$0");
+            // Escape all characters that are special in the type name grammar (II.23.1.16 / TypeNameParser).
+            // The backslash must be escaped as well, otherwise the result would be ambiguous.
+            foreach (char c in str) {
+                if (c is '\\' or '[' or ']' or ',' or '&' or '*' or '+' or '=') {
+                    sb.Append('\\');
+                }
+                sb.Append(c);
             }
-            sb.Append(str);
         }
     }
 }
