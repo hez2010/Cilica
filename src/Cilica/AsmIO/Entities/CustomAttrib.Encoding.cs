@@ -25,9 +25,48 @@ partial class CustomAttrib
     {
         writer.WriteUInt16(checked((ushort)_namedArgs.Length));
 
-        if (_namedArgs.Length > 0) {
-            throw new NotImplementedException();
+        foreach (var arg in _namedArgs) {
+            writer.WriteByte(arg.IsField ? kField : kProp);
+            EncodeElementType(writer, arg.Type);
+            writer.WriteSerializedString(arg.Name);
+            EncodeElement(writer, arg.Type, arg.Value);
         }
+    }
+
+    /// <summary> Writes the element type of a named argument. See ECMA-335 II.23.3. </summary>
+    private void EncodeElementType(BlobBuilder writer, TypeDesc type)
+    {
+        var sys = ParentModule.Resolver.SysTypes;
+
+        if (type is ArrayType) {
+            writer.WriteByte((byte)SerializationTypeCode.SZArray);
+            EncodeElementType(writer, type.ElemType!);
+            return;
+        }
+        if (type == sys.Type) {
+            writer.WriteByte((byte)SerializationTypeCode.Type);
+            return;
+        }
+        if (type == PrimType.Object) {
+            writer.WriteByte((byte)SerializationTypeCode.TaggedObject);
+            return;
+        }
+        
+        // Enums have to be handled before the type kind, because an enum's kind is its underlying type.
+        if (type.IsEnum) {
+            writer.WriteByte((byte)SerializationTypeCode.Enum);
+            writer.WriteSerializedString(SerializeType(type, ParentModule));
+            return;
+        }
+
+        // Boolean..String are the only primitives that are valid attribute element types,
+        // and their serialization codes match their signature codes.
+        if (type.Kind is >= TypeKind.Bool and <= TypeKind.String) {
+            writer.WriteByte((byte)type.Kind.ToSrmTypeCode());
+            return;
+        }
+
+        throw new NotSupportedException($"Cannot encode '{type}' as a custom attribute element type.");
     }
 
     private void EncodeElement(BlobBuilder writer, TypeDesc type, object? value)
@@ -46,9 +85,8 @@ partial class CustomAttrib
             return;
         }
         else if (IsSystemType(type)) {
-            // string? typeName = reader.ReadSerializedString();
-            // return ParseSerializedType(_parentModule!, typeName!);
-            throw new NotImplementedException(); // SerializeType() is broken
+            // TODO: Encode 'System.Type' arguments, which are stored as a serialized type name.
+            throw new NotImplementedException();
         }
 #pragma warning disable format
         else switch (type.Kind) {
@@ -67,6 +105,7 @@ partial class CustomAttrib
             case TypeKind.String: writer.WriteSerializedString((string?)value); break;
             // Boxed value
             case var _ when type == PrimType.Object:
+                // TODO: Encode boxed values, which are prefixed with their own element type.
                 throw new NotImplementedException();
 
             default: throw new NotSupportedException();
