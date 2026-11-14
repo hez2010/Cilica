@@ -25,9 +25,48 @@ partial class CustomAttrib
     {
         writer.WriteUInt16(checked((ushort)_namedArgs.Length));
 
-        if (_namedArgs.Length > 0) {
-            throw new NotImplementedException();
+        foreach (var arg in _namedArgs) {
+            writer.WriteByte(arg.IsField ? kField : kProp);
+            EncodeElementType(writer, arg.Type);
+            writer.WriteSerializedString(arg.Name);
+            EncodeElement(writer, arg.Type, arg.Value);
         }
+    }
+
+    /// <summary> Writes the element type of a named argument. See ECMA-335 II.23.3. </summary>
+    private void EncodeElementType(BlobBuilder writer, TypeDesc type)
+    {
+        var sys = ParentModule.Resolver.SysTypes;
+
+        if (type is ArrayType) {
+            writer.WriteByte((byte)SerializationTypeCode.SZArray);
+            EncodeElementType(writer, type.ElemType!);
+            return;
+        }
+        if (type == sys.Type) {
+            writer.WriteByte((byte)SerializationTypeCode.Type);
+            return;
+        }
+        if (type == PrimType.Object) {
+            writer.WriteByte((byte)SerializationTypeCode.TaggedObject);
+            return;
+        }
+        
+        // Enums have to be handled before the type kind, because an enum's kind is its underlying type.
+        if (type.IsEnum) {
+            writer.WriteByte((byte)SerializationTypeCode.Enum);
+            writer.WriteSerializedString(SerializeType(type, ParentModule));
+            return;
+        }
+
+        // Boolean..String are the only primitives that are valid attribute element types,
+        // and their serialization codes match their signature codes.
+        if (type.Kind is >= TypeKind.Bool and <= TypeKind.String) {
+            writer.WriteByte((byte)type.Kind.ToSrmTypeCode());
+            return;
+        }
+
+        throw new NotSupportedException($"Cannot encode '{type}' as a custom attribute element type.");
     }
 
     private void EncodeElement(BlobBuilder writer, TypeDesc type, object? value)
@@ -46,9 +85,15 @@ partial class CustomAttrib
             return;
         }
         else if (IsSystemType(type)) {
-            // string? typeName = reader.ReadSerializedString();
-            // return ParseSerializedType(_parentModule!, typeName!);
-            throw new NotImplementedException(); // SerializeType() is broken
+            // 'System.Type' arguments are stored as the name of the type they refer to.
+            var typeName = value switch {
+                null => null,
+                TypeDesc typeValue => SerializeType(typeValue, ParentModule),
+                _ => throw new ArgumentException(
+                    $"Expected a '{nameof(TypeDesc)}' value for a 'System.Type' argument but got '{value.GetType().Name}'.", nameof(value))
+            };
+            writer.WriteSerializedString(typeName);
+            return;
         }
 #pragma warning disable format
         else switch (type.Kind) {
@@ -66,11 +111,54 @@ partial class CustomAttrib
             case TypeKind.Double: writer.WriteDouble((double)value!); break;
             case TypeKind.String: writer.WriteSerializedString((string?)value); break;
             // Boxed value
-            case var _ when type == PrimType.Object:
-                throw new NotImplementedException();
+            case var _ when type == PrimType.Object: {
+                var actualType = GetSerializedTypeOfValue(value);
+                EncodeElementType(writer, actualType);
+                EncodeElement(writer, actualType, value);
+                break;
+            }
 
             default: throw new NotSupportedException();
         }
+    }
+
+    /// <summary>
+    /// Gets the type that a value boxed into a <see cref="SerializationTypeCode.TaggedObject"/> slot is serialized as.
+    /// </summary>
+    private TypeDesc GetSerializedTypeOfValue(object? value)
+    {
+        return value switch {
+            // A boxed null has no type to tag it with, so it cannot be represented.
+            null => throw new ArgumentException("A boxed 'System.Object' argument cannot be null.", nameof(value)),
+            TypeDesc => ParentModule.Resolver.SysTypes.Type,
+            _ => GetSerializedTypeOfClrType(value.GetType())
+        };
+    }
+
+    private TypeDesc GetSerializedTypeOfClrType(System.Type type)
+    {
+        if (type.IsArray) {
+            return GetSerializedTypeOfClrType(type.GetElementType()!).CreateArray();
+        }
+        if (type == typeof(System.Type)) {
+            return ParentModule.Resolver.SysTypes.Type;
+        }
+        return System.Type.GetTypeCode(type) switch {
+            TypeCode.Boolean => PrimType.Bool,
+            TypeCode.Char    => PrimType.Char,
+            TypeCode.SByte   => PrimType.SByte,
+            TypeCode.Byte    => PrimType.Byte,
+            TypeCode.Int16   => PrimType.Int16,
+            TypeCode.UInt16  => PrimType.UInt16,
+            TypeCode.Int32   => PrimType.Int32,
+            TypeCode.UInt32  => PrimType.UInt32,
+            TypeCode.Int64   => PrimType.Int64,
+            TypeCode.UInt64  => PrimType.UInt64,
+            TypeCode.Single  => PrimType.Single,
+            TypeCode.Double  => PrimType.Double,
+            TypeCode.String  => PrimType.String,
+            _ => throw new ArgumentException($"Cannot encode a boxed value of type '{type}'.", nameof(type))
+        };
     }
 
     private static bool IsSystemType(TypeDesc type)
