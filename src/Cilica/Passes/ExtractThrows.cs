@@ -85,7 +85,7 @@ public class ExtractThrows : IMethodPass
     {
         string prefix = "TH_" + ctor.DeclaringType.Name;
         string name = prefix;
-        for (int suffix = 1; owner.Methods.Any(method => method.Name == name); suffix++) name = prefix + "_" + suffix;
+        for (int suffix = owner.Methods.Count; owner.Methods.Any(method => method.Name == name); suffix++) name = prefix + "_" + suffix;
         ImmutableArray<ParamDef> parameters = pool != null ? [new ParamDef(PrimType.UInt32, "messageId")] :
             ctor.ParamSig.Count == 2 ? [new ParamDef(PrimType.String, "message")] : [];
         var helper = owner.CreateMethod(name, PrimType.Void, parameters, MethodAttributes.Assembly | MethodAttributes.Static);
