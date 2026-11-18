@@ -166,6 +166,17 @@ public class ArrayRuntimeTests
         Assert.Equal("second", values[0]);
         Assert.Throws<ArrayTypeMismatchException>(() => ReadWritable(values));
         Assert.Throws<ArrayTypeMismatchException>(() => WriteWritable(values));
+        int calls = 0;
+        Assert.Throws<ArrayTypeMismatchException>(() => WriteAfterEvaluation(values, () => { calls++; return "third"; }));
+        Assert.Equal(1, calls);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static void WriteAfterEvaluation(object[] values, Func<object> getValue)
+    {
+        object value = getValue();
+        ref object element = ref values[0];
+        element = value;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

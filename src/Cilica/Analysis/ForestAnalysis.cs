@@ -38,9 +38,10 @@ public class ForestAnalysis : IMethodAnalysis
         if (depth >= MaxExpressionDepth) return;
         var opers = inst.Operands;
 
-        if (inst is StoreInst { Flags: 0 } && opers[0] is FieldAddrInst or ArrayAddrInst) {
-            // For stores, inline the address first to hide hazards, assuming they
-            // will be combined into a single CIL instruction.
+        if (inst is StoreInst { Flags: 0, Address: AddressInst address } store && store.ElemType == address.ElemType &&
+            address is FieldAddrInst or ArrayAddrInst { RequiresVarianceCheck: false }) {
+            // Indexed and field stores perform their checks after evaluating the value.
+            // Inline the address first so the hazard scan accounts for those checks at the combined store.
             InlineOperand(0);
             InlineOperand(1);
             return;
