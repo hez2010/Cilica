@@ -160,11 +160,13 @@ public class SimplifyInstsTests(ModuleResolverFixture fixture) : PassTestBase(fi
         builder.CreateReturn(builder.CreateCallVirt("Invoke", callback, body.Args[0]));
 
         Run(body, new SimplifyInsts(_modResolver), new SimplifyCFG(), new DeadCodeElim());
-        Assert.DoesNotContain(body.Instructions().OfType<CallInst>(), call => call.Method.Name == "Invoke");
         var run = Utils.Compile<Func<string?, int>>(body);
         Assert.Equal(3, run("abc"));
         Assert.Equal(5, run("hello"));
         Assert.Throws<NullReferenceException>(() => run(null));
+        var field = run.Method.Module.Assembly.GetType("OpenCache")!.GetField("Value", BindingFlags.Static | BindingFlags.NonPublic)!;
+        field.SetValue(null, (Func<string?, int>)(_ => 42));
+        Assert.Equal(42, run(null));
     }
 
     [Fact]
@@ -208,7 +210,7 @@ public class SimplifyInstsTests(ModuleResolverFixture fixture) : PassTestBase(fi
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void CachedLambdaReceiversMoveOnlyAfterTheirTypeHasInitialized(bool separateReceiverType)
+    public void CachedLambdaReceiversInitializeOnlyOnTheConstructionPath(bool separateReceiverType)
     {
         var body = Utils.CreateTestMethod(_modResolver, PrimType.Int32, PrimType.Int32);
         var module = body.Definition.Module;
@@ -255,12 +257,12 @@ public class SimplifyInstsTests(ModuleResolverFixture fixture) : PassTestBase(fi
         loop.Exit.CreateReturn(loop.Exit.CreateAdd(sum, loop.Exit.CreateFieldLoad(effect)));
         Run(body, new SimplifyInsts(_modResolver));
 
-        Assert.Equal("get_Length", invoke.Method.Name);
-        var rematerialized = Assert.IsType<LoadInst>(invoke.Args[0]);
-        Assert.Same(separateReceiverType ? invoke.Block : entry, rematerialized.Block);
-        Assert.True(rematerialized.MayThrow);
         Run(body, new SimplifyCFG(), new DeadCodeElim());
         var run = Utils.Compile<Func<int, int>>(body);
+        var field = run.Method.Module.Assembly.GetType("LambdaCache")!.GetField("Cache")!;
+        field.SetValue(null, (Func<int>)(() => 11));
+        Assert.Equal(separateReceiverType ? 33 : 83, run(3));
+        field.SetValue(null, null);
         Assert.Equal(50, run(0));
         Assert.Equal(59, run(3));
     }

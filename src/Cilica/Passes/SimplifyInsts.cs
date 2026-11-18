@@ -8,13 +8,12 @@ using Cmp = IR.CompareOp;
 /// <summary> Implements peepholes/combining/scalar transforms that don't affect control flow. </summary>
 public partial class SimplifyInsts : IMethodPass
 {
-    readonly TypeDefOrSpec t_Delegate, t_DictionaryOfTT;
+    readonly TypeDefOrSpec t_DictionaryOfTT;
     // The inliner uses this to retain recursion ancestry through call rewrites.
     internal Action<CallInst, CallInst>? OnCallReplaced { get; init; }
 
     public SimplifyInsts(ModuleResolver resolver)
     {
-        t_Delegate = resolver.Import(typeof(Delegate));
         t_DictionaryOfTT = resolver.Import(typeof(Dictionary<,>));
     }
 
@@ -53,7 +52,7 @@ public partial class SimplifyInsts : IMethodPass
         var declType = method.DeclaringType;
 
         bool changed = method.Name switch {
-            "Invoke" when declType.Inherits(t_Delegate)
+            "Invoke" when DelegateUtils.IsRuntimeInvoke(method)
                 => DevirtualizeLambda(call, logger),
 
             "ContainsKey" when declType is TypeDefOrSpec s && s.Definition == t_DictionaryOfTT

@@ -162,6 +162,114 @@ public class GenericRuntimeTests
         Assert.Equal(0, BoxNullable<decimal>(42m)!.CompareTo(42m));
     }
 
+    [System.Runtime.CompilerServices.CompilerGenerated]
+    static class DelegateCache
+    {
+        public static Func<int, bool>? Callback;
+    }
+
+    [Fact]
+    public void CachedPredicatesUseTheActualInvocationList()
+    {
+        int[] values = [1, 2, 3];
+        DelegateCache.Callback = null;
+        Assert.Equal(2, CountPositive(values));
+        int calls = 0;
+        DelegateCache.Callback = x => { calls++; return false; };
+        DelegateCache.Callback += x => x == 1;
+        Assert.Equal(1, CountPositive(values));
+        Assert.Equal(3, calls);
+    }
+
+    [Fact]
+    public void PassingACachedDelegateToAnObserverPreservesItsIdentity()
+    {
+        IdentityObserver.Cached = null;
+        Assert.True(ObserveCached());
+        Assert.True(ObserveCached());
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static bool ObserveCached()
+    {
+        var callback = IdentityObserver.Cached ??= new Func<int, bool>(AboveOne);
+        IdentityObserver.Expected = callback;
+        return Forward(callback, 2);
+    }
+
+    static bool Forward(Func<int, bool> callback, int count)
+    {
+        for (int i = 0; i < count; i++) {
+            if (!IdentityObserver.Invoke(callback)) return false;
+        }
+        return true;
+    }
+
+    [Fact]
+    public void SingleInvocationReusesTheCachedDelegate()
+    {
+        DelegateCache.Callback = null;
+        CallOnce(0);
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        int matches = 0;
+        for (int i = 0; i < 32; i++) {
+            if (CallOnce(i)) matches++;
+        }
+        long bytes = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.Equal(30, matches);
+        Assert.Equal(0L, bytes);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static bool CallOnce(int value) => InvokeOnce(DelegateCache.Callback ??= new Func<int, bool>(AboveOne), value);
+
+    static bool InvokeOnce(Func<int, bool> callback, int value) => callback(value);
+
+    static class IdentityObserver
+    {
+        public static Func<int, bool>? Cached, Expected;
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public static bool Invoke(Func<int, bool> callback) => ReferenceEquals(callback, Expected);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static int CountPositive(int[] values)
+        => values.Count(DelegateCache.Callback ??= new Func<int, bool>(AboveOne));
+
+    static bool AboveOne(int value) => value > 1;
+
+    [Fact]
+    public void RepeatedQueriesWithCachedLambdasReuseTheirDelegates()
+    {
+        int[] values = [0, 1, 2, 3];
+        CountMatches(values);
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        int matches = 0;
+        for (int i = 0; i < 32; i++) matches += CountMatches(values);
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.Equal(64, matches);
+        Assert.Equal(0L, allocated);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static int CountMatches(int[] values) => values.Count(x => x > 1);
+
+    sealed class Receiver
+    {
+        public int GetValue() => 42;
+    }
+
+    [Fact]
+    public void ClosedDelegateConstructionValidatesTheReceiver()
+    {
+        Assert.Throws<ArgumentException>(() => InvokeClosed(null));
+        Assert.Equal(42, InvokeClosed(new Receiver()));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static int InvokeClosed(Receiver? receiver) => new Func<int>(receiver!.GetValue)();
+
     [Fact]
     public void ConcreteNullablePrimitivesCanBePassedAsInterfaces()
     {
