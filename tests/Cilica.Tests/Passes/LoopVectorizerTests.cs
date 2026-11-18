@@ -425,6 +425,8 @@ public class LoopVectorizerTests(ModuleResolverFixture fixture) : PassTestBase(f
 
         Assert.Equal(17, run(values, true));
         Assert.Equal(5, run(values, false));
+        byte even = 2;
+        Assert.Equal(5, run(values, System.Runtime.CompilerServices.Unsafe.As<byte, bool>(ref even)));
     }
 
     [Theory]
@@ -506,6 +508,31 @@ public class LoopVectorizerTests(ModuleResolverFixture fixture) : PassTestBase(f
     }
 
     delegate void SpanAction(Span<int> values);
+
+    [Fact]
+    public void NumericSelectArmsPreserveInvariantBooleanValues()
+    {
+        var body = Utils.CreateTestMethod(_modResolver, PrimType.Void, PrimType.Int32.CreateArray(), PrimType.Bool);
+        var entry = body.CreateBlock();
+        var loop = new LoopBuilder(entry);
+        entry.SetBranch(loop.EntryBlock);
+        var index = loop.CreateInductor();
+        loop.Build(h => h.CreateSlt(index, h.CreateConvert(h.CreateArrayLen(body.Args[0]), PrimType.Int32)), b => {
+            var value = b.CreateArrayLoad(body.Args[0], index);
+            var selected = b.CreateSelect(b.CreateSlt(value, ConstInt.CreateI(0)), body.Args[1], value, PrimType.Int32);
+            b.CreateArrayStore(body.Args[0], index, selected);
+        });
+        loop.Exit.CreateReturn();
+        Vectorize(body, expected: true);
+        var run = Utils.Compile<Action<int[], bool>>(body);
+        foreach (byte raw in new byte[] { 0, 1, 2, 255 }) {
+            byte value = raw;
+            bool flag = System.Runtime.CompilerServices.Unsafe.As<byte, bool>(ref value);
+            var values = Enumerable.Range(-20, 40).ToArray();
+            run(values, flag);
+            Assert.Equal(Enumerable.Range(-20, 40).Select(x => x < 0 ? raw : x), values);
+        }
+    }
 
     [Fact]
     public void NegativeTripCountsDoNotOverflowTheVectorBound()

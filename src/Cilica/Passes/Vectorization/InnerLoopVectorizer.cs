@@ -13,7 +13,10 @@ internal sealed class InnerLoopVectorizer
     readonly BasicBlock _bodyBlock;
     Value _newCounter = null!;
     IRBuilder _vectorPreHeader = null!;
-    readonly Dictionary<(VectorShape Shape, Value Scalar), Value> _invariants = new();
+    // An invariant bool with stack value 2 broadcasts as 2 for arithmetic, all ones for
+    // a select condition, and zero when ANDed with a comparison's 0/1 result.
+    enum BooleanUse { Numeric, Mask, LowBitMask }
+    readonly Dictionary<(VectorShape Shape, Value Scalar, BooleanUse Use), Value> _invariants = new();
     readonly Dictionary<VectorShape, Value> _counterOffsets = new();
     readonly Dictionary<Value, Value> _arrayBases = new();
     int _elemBitWidth;
@@ -93,6 +96,14 @@ internal sealed class InnerLoopVectorizer
         }
 
         foreach (var inst in _bodyBlock) {
+            if (inst is SelectInst { Cond: var condition } && condition.ResultType.Kind != TypeKind.Bool && !_loop.IsInvariant(condition)) return false;
+            if (inst is BinaryInst { ResultType.Kind: TypeKind.Bool } bits) {
+                for (int i = 0; i < 2; i++) {
+                    var operand = bits.Operands[i];
+                    if (_loop.IsInvariant(operand) && !ConstFolding.IsBooleanBit(operand) &&
+                        !(bits.Op == BinaryOp.And && ConstFolding.IsBooleanBit(bits.Operands[1 - i]))) return false;
+                }
+            }
             switch (inst) {
                 case ArrayAddrInst: {
                     // Legality has proved the full range or requested a runtime guard.
@@ -350,15 +361,21 @@ internal sealed class InnerLoopVectorizer
                 VectorOp.U2F => new VectorShape(TypeKind.UInt32, _width),
                 _ => vecType
             };
+            var booleanUse = inst switch {
+                SelectInst when i == 0 => BooleanUse.Mask,
+                BinaryInst { ResultType.Kind: TypeKind.Bool, Op: BinaryOp.And } => BooleanUse.LowBitMask,
+                BinaryInst { ResultType.Kind: TypeKind.Bool } => BooleanUse.Mask,
+                _ => BooleanUse.Numeric
+            };
             args[i] = i == 1 && mapping.TargetOp is VectorOp.Shl or VectorOp.Shra or VectorOp.Shrl
                 ? GetScalarMapping(arg)
-                : GetVectorMapping(newLoop.Body, argumentType, arg);
+                : GetVectorMapping(newLoop.Body, argumentType, arg, booleanUse);
         }
 
         return _trans.EmitOp(newLoop.Body, vecType, mapping.TargetOp, args);
     }
 
-    private Value GetVectorMapping(IRBuilder builder, VectorShape vecType, Value scalar)
+    private Value GetVectorMapping(IRBuilder builder, VectorShape vecType, Value scalar, BooleanUse booleanUse = BooleanUse.Numeric)
     {
         if (scalar == _loop.UpdatedCounter && _loop.Counter.ResultType.IsInt()) {
             var current = GetVectorMapping(builder, vecType, _loop.Counter);
@@ -408,22 +425,24 @@ internal sealed class InnerLoopVectorizer
         }
 
         if (_loop.IsInvariant(scalar)) {
-            if (_invariants.TryGetValue((vecType, scalar), out var invariant)) {
+            if (_invariants.TryGetValue((vecType, scalar, booleanUse), out var invariant)) {
                 return invariant;
             }
 
-            if (scalar.ResultType.Kind == TypeKind.Bool) {
+            if (booleanUse != BooleanUse.Numeric) {
                 var maskType = vecType.ElemType.IsFloat()
                     ? new VectorShape(vecType.ElemKind == TypeKind.Single ? TypeKind.Int32 : TypeKind.Int64, vecType.Count)
                     : vecType;
-                var bits = _vectorPreHeader.CreateSelect(scalar, ConstInt.Create(maskType.ElemType, -1), ConstInt.Create(maskType.ElemType, 0));
+                var condition = booleanUse == BooleanUse.LowBitMask ? _vectorPreHeader.CreateAnd(scalar, ConstInt.CreateI(1)) : scalar;
+                var bits = _vectorPreHeader.CreateSelect(condition, ConstInt.Create(maskType.ElemType, -1), ConstInt.Create(maskType.ElemType, 0));
                 var mask = _trans.EmitOp(_vectorPreHeader, maskType, VectorOp.Splat, bits);
                 invariant = _trans.EmitBitcast(_vectorPreHeader, maskType, vecType.ElemKind, mask);
             } else {
-                invariant = _trans.EmitOp(_vectorPreHeader, vecType, VectorOp.Splat, scalar);
+                var value = scalar.ResultType.Kind == TypeKind.Bool ? _vectorPreHeader.CreateConvert(scalar, vecType.ElemType) : scalar;
+                invariant = _trans.EmitOp(_vectorPreHeader, vecType, VectorOp.Splat, value);
             }
 
-            _invariants.Add((vecType, scalar), invariant);
+            _invariants.Add((vecType, scalar, booleanUse), invariant);
 
             return invariant;
         }
@@ -529,9 +548,9 @@ internal sealed class InnerLoopVectorizer
         return inst is BinaryInst {
             Op: BinaryOp.Add,
             Left: PhiInst phi,
-            Right.ResultType.Kind: TypeKind.Bool,
+            Right: Instruction { ResultType.Kind: TypeKind.Bool } condition,
             NumUses: 1
-        } bin && inst.Users().First() == phi;
+        } bin && condition.Block == inst.Block && inst.Users().First() == phi;
     }
 
     private struct InstMapping

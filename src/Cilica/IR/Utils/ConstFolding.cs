@@ -193,7 +193,7 @@ public class ConstFolding
                 break;
             }
             // (x != 0) -> x when x is known to be 0 or 1.
-            case (_, ConstInt { Value: 0 }, CompareOp.Ne) when IsBooleanBit(left): {
+            case ({ ResultType.StackType: StackType.Int }, ConstInt { Value: 0 }, CompareOp.Ne) when IsBooleanBit(left): {
                 return left;
             }
             // x == x, x != x
@@ -211,7 +211,9 @@ public class ConstFolding
 
     internal static bool IsBooleanBit(Value value, int depth = 0) => value switch {
         CompareInst { ResultType.Kind: TypeKind.Bool } or ConstInt { Value: 0 or 1 } => true,
-        BinaryInst { Op: BinaryOp.And or BinaryOp.Or or BinaryOp.Xor } binary when depth < 8 =>
+        BinaryInst { Op: BinaryOp.And } binary when depth < 8 =>
+            IsBooleanBit(binary.Left, depth + 1) || IsBooleanBit(binary.Right, depth + 1),
+        BinaryInst { Op: BinaryOp.Or or BinaryOp.Xor } binary when depth < 8 =>
             IsBooleanBit(binary.Left, depth + 1) && IsBooleanBit(binary.Right, depth + 1),
         _ => false
     };
