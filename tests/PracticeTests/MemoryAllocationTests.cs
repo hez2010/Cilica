@@ -21,6 +21,23 @@ public class MemoryAllocationTests
     }
 
     [Fact]
+    public void InlinedInitializedLocalsStartFreshAtEveryCall()
+    {
+        int sum = 0;
+        for (int i = 0; i < 4; i++) sum += FreshLocal();
+        Assert.Equal(0, sum);
+    }
+
+    static int FreshLocal()
+    {
+        Unsafe.SkipInit(out int value);
+        return Increment(ref value);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static int Increment(ref int value) => value++;
+
+    [Fact]
     public void MultidimensionalArrayConstructorsRemainIntact()
     {
         var values = new double[2, 3];

@@ -271,8 +271,9 @@ public class ILImporter
 
                 if (Has(op, VarFlags.IsLocal)) {
                     ref int lastBlock = ref lastBlocks[varIdx];
-                    if (lastBlock != 0 && lastBlock != blockStartIdx + 1) {
-                        op |= VarFlags.CrossesBlock;
+                    if (lastBlock != 0 && lastBlock != blockStartIdx + 1 ||
+                        lastBlock == 0 && Has(op, VarFlags.Loaded)) {
+                        op |= VarFlags.RequiresSlot;
                     }
                     lastBlock = blockStartIdx + 1;
                     varIdx += _body.Args.Length;
@@ -365,7 +366,7 @@ public class ILImporter
         if (Has(op, VarFlags.IsArg)) {
             return (_varSlots[index] ?? _body.Args[index], _varFlags[index], false);
         }
-        const VarFlags kBlockLocalFlags = (VarFlags.IsLocal | VarFlags.Loaded | VarFlags.Stored) & ~VarFlags.CrossesBlock;
+        const VarFlags kBlockLocalFlags = VarFlags.IsLocal | VarFlags.Loaded | VarFlags.Stored;
 
         var localVar = _ilBody.Locals[index];
         index += _body.Args.Length;
@@ -374,11 +375,8 @@ public class ILImporter
         var flags = _varFlags[index];
         bool isBlockLocal = flags == kBlockLocalFlags && !localVar.IsPinned;
 
-        slot ??= isBlockLocal
-            ? (Has(op, VarFlags.Loaded) ? (_body.InitLocals
-                ? new IR.Utils.IRBuilder(_body.EntryBlock, IR.Utils.InsertionDir.Before).CreateDefaultOf(localVar.Type)
-                : new Undef(localVar.Type)) : null)
-            : _body.CreateVar(localVar.Type, pinned: localVar.IsPinned);
+        // A block-local load is always preceded by a store in the same block.
+        if (!isBlockLocal) slot ??= _body.CreateVar(localVar.Type, pinned: localVar.IsPinned);
 
         return (slot!, flags, isBlockLocal);
     }

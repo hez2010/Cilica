@@ -65,7 +65,7 @@ public class InlineMethods : IMethodPass
                 }
 
                 int cost = advisor.EvaluateInliningCost(target.Body!, call.Args);
-                if (cost > _opts.CostThreshold || cost > budget) {
+                if (cost == int.MaxValue || cost > _opts.CostThreshold || cost > budget) {
                     decisions?.Record(call, inlinee!, cost == int.MaxValue ? advisor.GetMetrics(target.Body!).Rejection.ToString()
                         : $"cost {cost} exceeds limit {Math.Min(_opts.CostThreshold, budget)}");
                     continue;
@@ -222,6 +222,7 @@ public class InlineMethods : IMethodPass
         comp.EmitInlineInitialization(builder, target);
 
         var cloner = new InlinerIRCloner(callerBody, target, onNewCall);
+        if (targetBody.InitLocals) cloner.InitializeLocals(targetBody, builder);
 
         // Add argument mappings
         for (int i = 0; i < targetBody.Args.Length; i++) {
@@ -307,6 +308,27 @@ public class InlineMethods : IMethodPass
     sealed class InlinerIRCloner(MethodBody caller, MethodDefOrSpec target, Action<CallInst>? onNewCall)
         : IRCloner(caller, new GenericContext(target))
     {
+        public void InitializeLocals(MethodBody body, IRBuilder builder)
+        {
+            HashSet<LocalSlot>? needsZero = null;
+            foreach (var slot in body.LocalVars()) {
+                if (slot.NumUses > 0) (needsZero ??= new()).Add(slot);
+            }
+            if (needsZero == null) return;
+            // A full store before the first read or escape supplies the local's initial value.
+            if (!body.EntryBlock.HasGuards) {
+                for (var inst = body.EntryBlock.Last; inst != null; inst = inst.Prev) {
+                    foreach (var operand in inst.Operands) {
+                        if (operand is LocalSlot slot) {
+                            if (inst is StoreInst store && store.Address == slot && store.ElemType == slot.Type) needsZero.Remove(slot);
+                            else needsZero.Add(slot);
+                        }
+                    }
+                }
+            }
+            foreach (var slot in needsZero) builder.CreateInitObj(Remap(slot));
+        }
+
         protected override Value CreateClone(Instruction inst)
         {
             var clonedVal = base.CreateClone(inst);

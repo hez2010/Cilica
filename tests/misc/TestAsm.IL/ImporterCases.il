@@ -1,5 +1,63 @@
 .class public ImporterCases
 {
+    .method public static int32 LoopLocal() cil managed {
+        .maxstack 3
+        .locals init (int32 temp, int32 i, int32 total)
+        ldc.i4.0
+        stloc.1
+        br.s Check
+    Body:
+        ldloc.0
+        ldc.i4.1
+        add
+        dup
+        stloc.0
+        ldloc.2
+        add
+        stloc.2
+        ldloc.1
+        ldc.i4.1
+        add
+        stloc.1
+    Check:
+        ldloc.1
+        ldc.i4.4
+        blt.s Body
+        ldloc.2
+        ret
+    }
+
+    .method public static int32 AddressLoop() cil managed {
+        .maxstack 4
+        .locals init (int32 temp, int32 i, int32 total, int32 save)
+        ldc.i4.0
+        stloc.1
+        br.s Check
+    Body:
+        ldloca.s 0
+        ldloca.s 0
+        ldind.i4
+        ldc.i4.1
+        add
+        dup
+        stloc.3
+        stind.i4
+        ldloc.2
+        ldloc.3
+        add
+        stloc.2
+        ldloc.1
+        ldc.i4.1
+        add
+        stloc.1
+    Check:
+        ldloc.1
+        ldc.i4.4
+        blt.s Body
+        ldloc.2
+        ret
+    }
+
     .method public static native unsigned int ObjectByteOffset(object origin, uint8& target)
     {
         .locals (object pinned owner, int32& originRef)

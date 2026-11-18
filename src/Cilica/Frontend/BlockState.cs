@@ -145,7 +145,9 @@ internal class BlockState
 
     private TypeDesc? GetMergedStackType(TypeDesc? currType, TypeDesc newType)
     {
-        // III.1.8.1.3
+        // ECMA-335 III.1.8.1.3, merging stack states.
+        // Small integer storage types are extended to int32 on the evaluation stack.
+        if (newType.Kind.IsSmallInt()) newType = PrimType.Int32;
         if (currType == null) {
             return newType;
         }
@@ -1044,6 +1046,6 @@ internal enum VarFlags
     OpMask = Loaded | Stored | AddrTaken,
 
 
-    CrossesBlock    = 1 << 5
+    RequiresSlot    = 1 << 5
 
 }

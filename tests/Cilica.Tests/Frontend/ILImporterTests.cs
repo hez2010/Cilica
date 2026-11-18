@@ -262,6 +262,21 @@ public class ILImporterTests(ModuleResolverFixture fixture)
 
     unsafe delegate object ReadObject(void* pointer);
 
+    [Theory]
+    [InlineData("LoopLocal")]
+    [InlineData("AddressLoop")]
+    public void LoopLocalReadsThePreviousIteration(string name)
+    {
+        using var resolver = new ModuleResolver();
+        resolver.AddTrustedSearchPaths();
+        var module = resolver.Load(Path.Combine(AppContext.BaseDirectory, "TestAsm.IL.dll"));
+        var method = (MethodDef)module.FindType(null, "ImporterCases")!.FindMethod(name);
+        var body = method.Body = ILImporter.ParseCode(method);
+        var compilation = new Compilation(module, new VoidLogger(), new() { VerifyEachPass = true });
+        PassRunner.Run(new SsaPromotion(), new MethodTransformContext(compilation, body));
+        Assert.Equal(10, Utils.Compile<Func<int>>(body)());
+    }
+
     [Fact]
     public void InitializedLocalsKeepTheirDefaultValueDuringPromotion()
     {

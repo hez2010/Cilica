@@ -15,6 +15,7 @@ public class SsaPromotion : IMethodPass
         Dictionary<LocalSlot, NameStack> _slotNameStacks = new();
         Dictionary<LocalSlot, Value> _initialValues = new();
         DominatorTree _domTree = null!;
+        InstructionOrder? _order;
 
         public MethodPassResult Run()
         {
@@ -73,20 +74,21 @@ public class SsaPromotion : IMethodPass
             }
 
             definingBlocks.Clear();
+            BasicBlock? firstBlock = null;
 
             foreach (var (user, operIdx) in slot.Uses()) {
                 if (user is not MemoryInst { IsVolatile: false } access || access.ElemType != slot.Type) {
                     return false;
                 }
-                if (user is StoreInst && operIdx == 0) {
-                    definingBlocks.Push(user.Block);
-                } else if (user is LoadInst) {
-                    isGlobal |= definingBlocks.Depth == 0 || definingBlocks.Top != user.Block;
-                } else {
-                    return false;
-                }
+                if (operIdx != 0) return false;
+                isGlobal |= (firstBlock ??= user.Block) != user.Block;
+                if (user is StoreInst) definingBlocks.Push(user.Block);
             }
-            isGlobal |= definingBlocks.UniqueCount >= 2;
+            if (!isGlobal && definingBlocks.UniqueCount == 1 && firstBlock != ctx.Method.EntryBlock) {
+                _order ??= new InstructionOrder(ctx.Method);
+                // A load before the first store may read the preceding loop iteration.
+                isGlobal = slot.Users().AsEnumerable().MinBy(_order.Index) is LoadInst;
+            }
 
             // Block dominance does not model the point at which an exception
             // interrupts a store sequence. Keep stores in one region and loads
