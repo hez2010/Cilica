@@ -98,45 +98,7 @@ public class ValueNumbering : IMethodPass
             }
 
             _memory ??= Context.GetAnalysis<MemoryAccessAnalysis>();
-
-            if (def.Block == user.Block) {
-                return !HasClobber(user.Block, def, user);
-            }
-
-            // Backedges contribute writes from the entire revisited block.
-            var worklist = new DiscreteStack<BasicBlock>(user.Block);
-
-            // Make the worklist forget the user block was pushed so the loop can check
-            // loop backedges when visiting predecessors.
-            worklist.UnmarkPushed(user.Block);
-            bool firstBlock = true;
-
-            while (worklist.TryPop(out var block)) {
-                if (HasClobber(block, block == def.Block ? def : null, firstBlock ? user : null)) {
-                    return false;
-                }
-
-                firstBlock = false;
-
-                if (block == def.Block) continue; // stop when reaching def's block
-
-                foreach (var pred in block.Preds) {
-                    worklist.Push(pred);
-                }
-            }
-
-            return true;
-
-            bool HasClobber(BasicBlock block, Instruction? after, Instruction? before)
-            {
-                foreach (var instruction in _memory.GetPotentialWrites(block, after, before)) {
-                    if (instruction.Block != null && MayClobberDef(def, instruction)) {
-                        return true;
-                    }
-                }
-
-                return false;
-            }
+            return _memory.IsUnchangedBetween(def, user.Block, user, write => MayClobberDef(def, write));
         }
 
         // Checks if `inst` may clobber the result value of `def`.

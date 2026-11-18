@@ -65,6 +65,9 @@ public class AliasAnalysis : IMethodAnalysis
             case (LocalSlot, ArrayAddrInst or Argument or Const): {
                 return false;
             }
+            case (ConstInt first, ConstInt second): {
+                return first.SignedStackValue == second.SignedStackValue;
+            }
             case (Const, Const): {
                 return v1.Equals(v2);
             }
@@ -83,6 +86,9 @@ public class AliasAnalysis : IMethodAnalysis
             if (t1 is ArrayType && t2 is ArrayType) {
                 var e1 = t1.ElemType!;
                 var e2 = t2.ElemType!;
+
+                if (e1.IsUnboundGeneric || e2.IsUnboundGeneric) return true;
+                if (e1 is ArrayType && e2 is ArrayType) return MayTypesAlias(e1, e2);
 
                 // U[] and S[] may alias (e.g. int[] and uint[])
                 if (e1.Kind.IsInt() || e2.Kind.IsInt()) {

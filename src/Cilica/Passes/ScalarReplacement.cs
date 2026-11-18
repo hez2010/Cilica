@@ -114,14 +114,16 @@ public class ScalarReplacement : IMethodPass
     }
 
     internal static bool AddressEscapes(TrackedValue address)
-        => address.Uses().Any(use => use.Parent switch {
-            LoadInst => use.OperIndex != 0,
-            StoreInst => use.OperIndex != 0,
-            FieldAddrInst nested => use.OperIndex != 0 || AddressEscapes(nested),
-            CilIntrinsic.MemSet => use.OperIndex != 0,
-            CilIntrinsic.MemCopy => use.OperIndex > 1,
+    {
+        var storage = address.ResultType.ElemType!;
+        return address.Uses().Any(use => use.Parent switch {
+            MemoryInst access => use.OperIndex != 0 || !MemoryInst.FitsStorage(access.ElemType, storage),
+            FieldAddrInst nested => use.OperIndex != 0 || nested.Field.DeclaringType != storage || AddressEscapes(nested),
+            CilIntrinsic.MemSet set => use.OperIndex != 0 || !set.FitsStorage(storage),
+            CilIntrinsic.MemCopy copy => use.OperIndex > 1 || !copy.FitsStorage(storage),
             _ => true
         });
+    }
 
     private static bool IsObjectCtorCall(Instruction inst)
     {

@@ -16,7 +16,6 @@ internal static class VectorizationLegality
         }
 
         var regions = context.GetAnalysis<ProtectedRegionAnalysis>();
-        var dominators = context.GetAnalysis<DominatorTree>();
         var region = regions.GetBlockRegion(loop.PreHeader);
 
         if (regions.GetBlockRegion(loop.Header) != region || regions.GetBlockRegion(loop.Latch) != region ||
@@ -32,10 +31,10 @@ internal static class VectorizationLegality
         if (pointerCounter) {
             if (loop.ExitCondition.Op != CompareOp.Ult ||
                 loop.UpdatedCounter is not PtrOffsetInst { Index: ConstInt { Value: 1 } } update ||
-                update.BasePtr != loop.Counter || !TryGetStorage(loop.Start, loop, out var storage) ||
+                update.BasePtr != loop.Counter || !TryGetStorage(loop.Start, out var storage) ||
                 update.Stride != storage.Element.Kind.Size() ||
                 loop.End is not PtrOffsetInst end || end.BasePtr != loop.Start ||
-                end.Stride != update.Stride || !IsBounded(end.Index, storage, loop, dominators, requireExactArrayLength: true)) {
+                end.Stride != update.Stride || !IsBounded(end.Index, storage, loop, context, requireExactArrayLength: true)) {
                 reason = "pointer induction requires a proven storage extent";
 
                 return false;
@@ -73,7 +72,7 @@ internal static class VectorizationLegality
 
             if (inst is ArrayAddrInst address &&
                 (!TryGetArrayStorage(loop, address, out var arrayStorage) ||
-                 !ProveOrGuardBound(loop, arrayStorage, dominators, boundsChecks))) {
+                 !ProveOrGuardBound(loop, arrayStorage, context, boundsChecks))) {
                 reason = "array accesses require invariant storage and the loop index without casts or variance checks";
 
                 return false;
@@ -81,7 +80,7 @@ internal static class VectorizationLegality
 
             if (inst is MemoryInst memory) {
                 if (memory.IsVolatile || !TryGetAccess(loop, memory, out var storage) ||
-                    !pointerCounter && !ProveOrGuardBound(loop, storage, dominators, boundsChecks)) {
+                    !pointerCounter && !ProveOrGuardBound(loop, storage, context, boundsChecks)) {
                     reason = "memory accesses require nonvolatile unit-stride storage with a proven or guardable extent";
 
                     return false;
@@ -122,7 +121,7 @@ internal static class VectorizationLegality
         Value address = access.Address;
 
         if (address == loop.Counter && loop.Counter.ResultType.IsPointerLike()) {
-            return TryGetStorage(loop.Start, loop, out storage) && access.ElemType == storage.Element;
+            return TryGetStorage(loop.Start, out storage) && access.ElemType == storage.Element;
         }
 
         if (address is ArrayAddrInst arrayAddress) {
@@ -131,7 +130,7 @@ internal static class VectorizationLegality
 
         if (address is not PtrOffsetInst offset || offset.Index != loop.Counter ||
             loop.Counter.ResultType.IsPointerLike() || !loop.IsInvariant(offset.BasePtr) ||
-            !TryGetStorage(offset.BasePtr, loop, out storage)) {
+            !TryGetStorage(offset.BasePtr, out storage)) {
             return false;
         }
 
@@ -152,9 +151,9 @@ internal static class VectorizationLegality
         return true;
     }
 
-    private static bool ProveOrGuardBound(CountingLoopInfo loop, Storage storage, DominatorTree dominators, List<Value> boundsChecks)
+    private static bool ProveOrGuardBound(CountingLoopInfo loop, Storage storage, MethodTransformContext context, List<Value> boundsChecks)
     {
-        if (IsBounded(loop.End, storage, loop, dominators)) return true;
+        if (IsBounded(loop.End, storage, loop, context)) return true;
         if (storage.Source.ResultType is not ArrayType) return false;
 
         // Array identity and extent cannot change. Check each unknown extent once
@@ -163,7 +162,7 @@ internal static class VectorizationLegality
         return true;
     }
 
-    private static bool TryGetStorage(Value pointer, CountingLoopInfo loop, out Storage storage)
+    private static bool TryGetStorage(Value pointer, out Storage storage)
     {
         storage = default;
 
@@ -187,47 +186,24 @@ internal static class VectorizationLegality
             return true;
         }
 
-        if (call.Method.Name == "GetPinnableReference" && source is LocalSlot slot &&
-            slot.Type.IsCorelibType() && slot.Type.Name is "Span`1" or "ReadOnlySpan`1") {
-            int initializations = 0;
-
-            foreach (var use in slot.Uses()) {
-                if (use.Parent is StoreInst store && use.OperIndex == 0 && store.Value is Argument argument &&
-                    argument.ResultType == slot.Type && !loop.Contains(store.Block)) {
-                    initializations++;
-                } else if (use.OperIndex != 0 || use.Parent is not CallInst accessor || accessor.Method.DeclaringType != slot.Type ||
-                    accessor.Method.Name is not ("get_Length" or "get_Item" or "GetPinnableReference")) {
-                    return false;
-                }
-            }
-
-            if (initializations == 1) {
-                storage = new(source, slot.Type.GenericParams[0]);
-
-                return true;
-            }
+        if (call.Method.Name == "GetPinnableReference" && source.ResultType is ByrefType { ElemType: var span } &&
+            call.Method.DeclaringType == span && RuntimeLibrary.IsSpanType(span)) {
+            storage = new(source, span.GenericParams[0], call);
+            return true;
         }
 
         return false;
     }
 
-    private static bool IsBounded(Value bound, Storage storage, CountingLoopInfo loop, DominatorTree dominators, bool requireExactArrayLength = false)
+    private static bool IsBounded(Value bound, Storage storage, CountingLoopInfo loop, MethodTransformContext context, bool requireExactArrayLength = false)
     {
         // Signed upper bounds alone may be negative. Integer induction then skips
         // the loop, but pointer induction needs a nonnegative storage extent.
         if (storage.Source.ResultType is ArrayType &&
-            ArrayBoundsFacts.IsLengthBound(bound, storage.Source, loop.PreHeader, dominators, exact: requireExactArrayLength)) return true;
-        while (bound is ConvertInst { CheckOverflow: false } conversion) {
-            bound = conversion.Value;
-        }
-
-        if (bound is CilIntrinsic.ArrayLen length && length.Args[0] == storage.Source) {
-            return true;
-        }
-
-        if (bound is CallInst { Method.Name: "get_Length", Args: [var source] } && source == storage.Source &&
-            (storage.Source.ResultType.Kind == TypeKind.String || storage.Source is LocalSlot)) {
-            return true;
+            ArrayBoundsFacts.IsLengthBound(bound, storage.Source, loop.PreHeader, context.GetAnalysis<DominatorTree>(), exact: requireExactArrayLength)) return true;
+        if (bound is CallInst { Method.Name: "get_Length", Args: [var source] } length) {
+            if (storage.SpanReference is { } pointer) return context.GetAnalysis<SpanStorageAnalysis>().DescribeSameView(pointer, length);
+            if (source == storage.Source && length.Method.DeclaringType.IsCorelibType(typeof(string))) return true;
         }
 
         if (storage.Source is CilIntrinsic.NewArray allocation && bound.Equals(allocation.Args[0])) {
@@ -251,5 +227,5 @@ internal static class VectorizationLegality
            left is CilIntrinsic.NewArray && right is CilIntrinsic.NewArray && left != right ||
            left.ResultType.Kind == TypeKind.String || right.ResultType.Kind == TypeKind.String;
 
-    readonly record struct Storage(Value Source, TypeDesc Element);
+    readonly record struct Storage(Value Source, TypeDesc Element, CallInst? SpanReference = null);
 }

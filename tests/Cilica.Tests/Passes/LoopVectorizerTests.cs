@@ -102,6 +102,25 @@ public class LoopVectorizerTests(ModuleResolverFixture fixture) : PassTestBase(f
     }
 
     [Fact]
+    public void ConvertedLengthRetainsTheScalarBoundsCheck()
+    {
+        var body = Utils.CreateTestMethod(_modResolver, PrimType.Void, PrimType.Int32.CreateArray());
+        var entry = new IRBuilder(body.CreateBlock());
+        var length = entry.CreateConvert(entry.CreateArrayLen(body.Args[0]), PrimType.SByte);
+        var bound = entry.CreateConvert(length, PrimType.UInt16);
+        var loop = new LoopBuilder(entry.Block);
+        entry.SetBranch(loop.EntryBlock);
+        var index = loop.CreateInductor();
+        loop.Build(h => h.CreateSlt(index, bound), b => b.CreateArrayStore(body.Args[0], index, ConstInt.CreateI(7)));
+        loop.Exit.CreateReturn();
+        Vectorize(body, expected: true);
+        Assert.Contains(body.Instructions().OfType<CompareInst>(), cmp => cmp.Op == CompareOp.Ugt && cmp.Left == bound);
+        var values = new int[128];
+        Assert.Throws<IndexOutOfRangeException>(() => Utils.Compile<Action<int[]>>(body)(values));
+        Assert.All(values, value => Assert.Equal(7, value));
+    }
+
+    [Fact]
     public void NullArrayGuardDoesNotPreemptEarlierStores()
     {
         var body = Utils.CreateTestMethod(_modResolver, PrimType.Void, PrimType.Int32.CreateArray(), PrimType.Int32.CreateArray());

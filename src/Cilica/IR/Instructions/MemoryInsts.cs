@@ -19,6 +19,13 @@ public abstract class MemoryInst : Instruction
 
     public abstract TypeDesc ElemType { get; }
 
+    internal static bool FitsStorage(TypeDesc access, TypeDesc storage)
+    {
+        int bytes = access.Kind.Size();
+        // Only scalar data without managed references has a fixed positive size here.
+        return access == storage || bytes > 0 && bytes <= storage.Kind.Size();
+    }
+
     public PointerFlags Flags { get => _flags; set => SetProperty(ref _flags, value); }
 
     private PointerFlags _flags;

@@ -179,53 +179,48 @@ public abstract class CilIntrinsic : IntrinsicInst
         public TypeDesc DestType => ResultType.ElemType!;
     }
 
+    public abstract class BlockMemory(EntityDesc[] types, Value[] args, PointerFlags flags) : CilIntrinsic(PrimType.Void, types, args)
+    {
+        public PointerFlags Flags { get => _flags; set => SetProperty(ref _flags, value); }
+        private PointerFlags _flags = flags;
+        public override bool IsMemoryBarrier => (Flags & PointerFlags.Volatile) != 0;
+        public override bool MayThrow => true;
+        public override bool MayWriteToMemory => true;
+
+        internal bool FitsStorage(TypeDesc storage) => StaticArgs is [TypeDesc type]
+            ? MemoryInst.FitsStorage(type, storage)
+            : Args[^1] is ConstInt size && size.UnsignedStackValue <= (uint)storage.Kind.Size();
+    }
+
     /// <summary>
     /// void MemCopy(void* dest, void* src, uint numBytes) <br/>
     /// void MemCopy&lt;T&gt;(void* dest, void* src)
     /// </summary>
-    public class MemCopy : CilIntrinsic
+    public class MemCopy : BlockMemory
     {
         public override ILCode Opcode => StaticArgs.Length > 0 ? ILCode.Cpobj : ILCode.Cpblk;
-
-        public PointerFlags Flags { get => _flags; set => SetProperty(ref _flags, value); }
-
-        private PointerFlags _flags;
-
-        public override bool IsMemoryBarrier => (Flags & PointerFlags.Volatile) != 0;
-
-        public override bool MayThrow => true;
-        public override bool MayWriteToMemory => true;
         public override bool MayReadFromMemory => true;
 
         public MemCopy(Value destPtr, Value srcPtr, Value numBytes, PointerFlags flags = 0)
-            : base(PrimType.Void, [destPtr, srcPtr, numBytes]) { Flags = flags; }
+            : base([], [destPtr, srcPtr, numBytes], flags) { }
 
         public MemCopy(Value destPtr, Value srcPtr, TypeDesc type, PointerFlags flags = 0)
-            : base(PrimType.Void, [type], [destPtr, srcPtr]) { Flags = flags; }
+            : base([type], [destPtr, srcPtr], flags) { }
     }
 
     /// <summary>
     /// void MemSet(void* ptr, byte value, uint numBytes)  <br/>
     /// void MemSet&lt;T&gt;(void* ptr)
     /// </summary>
-    public class MemSet : CilIntrinsic
+    public class MemSet : BlockMemory
     {
         public override ILCode Opcode => StaticArgs.Length > 0 ? ILCode.Initobj : ILCode.Initblk;
 
-        public PointerFlags Flags { get => _flags; set => SetProperty(ref _flags, value); }
-
-        private PointerFlags _flags;
-
-        public override bool IsMemoryBarrier => (Flags & PointerFlags.Volatile) != 0;
-
-        public override bool MayThrow => true;
-        public override bool MayWriteToMemory => true;
-
         public MemSet(Value destPtr, Value value, Value numBytes, PointerFlags flags = 0)
-            : base(PrimType.Void, [destPtr, value, numBytes]) { Flags = flags; }
+            : base([], [destPtr, value, numBytes], flags) { }
 
         public MemSet(Value destPtr, TypeDesc type, PointerFlags flags = 0)
-            : base(PrimType.Void, [type], [destPtr]) { Flags = flags; }
+            : base([type], [destPtr], flags) { }
     }
 
     /// <summary> int SizeOf&lt;T&gt;() </summary>

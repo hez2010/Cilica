@@ -9,7 +9,9 @@ public class LoopStrengthReduction : IMethodPass
     public MethodPassResult Run(MethodTransformContext ctx)
     {
         var loopAnalysis = ctx.GetAnalysis<LoopAnalysis>();
+        if (loopAnalysis.Loops.Count == 0) return MethodInvalidations.None;
         var domTree = ctx.GetAnalysis<DominatorTree>();
+        var spans = ctx.GetAnalysis<SpanStorageAnalysis>();
         int numChanges = 0;
 
         foreach (var loop in loopAnalysis.Loops) {
@@ -18,7 +20,7 @@ public class LoopStrengthReduction : IMethodPass
             // Don't reduce loops with more than one body block, because the 
             // only benefit it has is in enabling vectorization.
             if (loop.NumBlocks <= 2 && ShapedLoopInfo.Parse(loop) is CountingLoopInfo countingLoop) {
-                numChanges += ReduceLoop(countingLoop, domTree, ctx.Logger);
+                numChanges += ReduceLoop(countingLoop, domTree, spans, ctx.Logger);
             }
         }
         return numChanges > 0 ? MethodInvalidations.DataFlow : 0;
@@ -70,7 +72,7 @@ public class LoopStrengthReduction : IMethodPass
         return numChanges;
     }
 
-    private int ReduceLoop(CountingLoopInfo loop, DominatorTree dominators, ICompilationLogger logger)
+    private int ReduceLoop(CountingLoopInfo loop, DominatorTree dominators, SpanStorageAnalysis spans, ICompilationLogger logger)
     {
         // Strength-reducing array indexes in backward loops is not trivial, as the GC
         // doesn't update refs pointing outside an object when compacting the heap.
@@ -107,8 +109,9 @@ public class LoopStrengthReduction : IMethodPass
         }
 
         foreach (var (source, (addrs, boundsLoop, isSpan)) in indexedAccs) {
-            if (isSpan && !IsSpanLive(source, loop.Loop)) continue;
             if (!loop.IsInvariant(source)) continue;
+            if (isSpan && !spans.CanHoistLength((CallInst)loop.End, loop)) continue;
+            numChanges++;
             // Preheader:
             //  ...
             //  T& basePtr = call MemoryMarshal::GetArrayDataReference<T>(T[]: array)
@@ -124,7 +127,15 @@ public class LoopStrengthReduction : IMethodPass
                                   (isSpan || ArrayBoundsFacts.IsLengthBound(loop.End, source, loop.PreHeader, dominators, exact: true));
 
             var builder = new IRBuilder(loop.PreHeader);
-            var (startPtr, count) = CreateGetDataPtrRange(builder, source, getCount: shouldCreateIV);
+            var bound = loop.End;
+            bool hoistSpanLength = isSpan && !loop.IsInvariant(bound);
+            var (startPtr, count) = CreateGetDataPtrRange(builder, source, getCount: isSpan ? hoistSpanLength : shouldCreateIV);
+            if (hoistSpanLength) {
+                loop.ExitCondition.Right = count;
+                if (bound is Instruction { NumUses: 0 } unused) unused.Remove();
+            } else if (isSpan) {
+                count = bound;
+            }
 
             if (shouldCreateIV) {
                 var currPtr = loop.Header.InsertPhi(startPtr.ResultType).SetName("lsr_ptr");
@@ -159,21 +170,6 @@ public class LoopStrengthReduction : IMethodPass
                     addr.ReplaceWith(builder.CreatePtrOffset(startPtr, addr.Operands[1]));
                 }
 
-                // Hoist array/span length access
-                if (loop.ExitCondition.Right is Instruction oldBound && !loop.IsInvariant(oldBound)) {
-                    if (oldBound is ConvertInst { Value: IntrinsicInst oldLen }) {
-                        // conv(arrlen)
-                        if (oldBound.Prev == oldLen) {
-                            oldBound.MoveBefore(loop.PreHeader.Last);
-                            oldLen.MoveBefore(oldBound);
-                        }
-                    } else {
-                        oldBound.MoveBefore(loop.PreHeader.Last);
-                    }
-                    if (oldBound.Block == loop.PreHeader) {
-                        logger.Trace($"Hoisted loop bound '{oldBound}' to '{loop.PreHeader}' for loop '{loop.Header}'.");
-                    }
-                }
                 logger.Trace($"Replaced indexing of '{source}' in '{loop.Header}' with pointer offsets.");
             }
         }
@@ -182,11 +178,14 @@ public class LoopStrengthReduction : IMethodPass
             loop.UpdatedCounter.Remove();
             loop.Counter.Remove();
         }
-        return numChanges + indexedAccs.Count;
+        return numChanges;
     }
 
     private static bool HoistArrayBound(CountingLoopInfo loop, DominatorTree dominators)
     {
+        // Hoist the two instructions that form conv(arrlen(array)) together.
+        //   len = intrinsic CIL::ArrayLen(array) -> nuint
+        //   bound = conv len -> int
         // The bounding array need not be indexed by the body. Hoist its length
         // even when no accesses can be reduced until runtime bounds guards exist.
         if (loop.Header.HasGuards || loop.GetSourceArray() == null ||
@@ -214,21 +213,10 @@ public class LoopStrengthReduction : IMethodPass
     private static bool IsBoundedBySpanLen(CallInst getItemCall, CompareInst exitCond)
     {
         // exitCond is cmp.slt ($index, $span.Length)
-        return exitCond.Op is CompareOp.Slt &&
-               exitCond.Left == getItemCall.Args[1] &&
-               exitCond.Right is CallInst { Method.Name: "get_Length" } bound &&
-               bound.Args[0] == getItemCall.Args[0] && IsSpanMethod(bound.Method);
-    }
-    // Checks if the span is used by any instruction other than a instance call, indicating that it may have been reassigned.
-    private static bool IsSpanLive(Value source, LoopInfo loop)
-    {
-        return source is TrackedValue def &&
-               def.Users().All(u => !loop.Contains(u.Block) || (u is CallInst call && IsSpanMethod(call.Method)));
-    }
-    private static bool IsSpanMethod(MethodDesc method)
-    {
-        return method.DeclaringType.IsCorelibType() && 
-               method.DeclaringType.Name is "Span`1" or "ReadOnlySpan`1";
+        return exitCond.Op is CompareOp.Slt && RuntimeLibrary.IsSpanType(getItemCall.Method.DeclaringType) &&
+               getItemCall.Args is [var source, var index] && exitCond.Left == index &&
+               exitCond.Right is CallInst { Method.Name: "get_Length", Args: [var receiver] } bound &&
+               receiver == source && bound.Method.DeclaringType == getItemCall.Method.DeclaringType;
     }
     
     /// <summary>
@@ -249,7 +237,7 @@ public class LoopStrengthReduction : IMethodPass
                 builder.CreateCallVirt("GetPinnableReference", source),
                 getCount ? builder.CreateCallVirt("get_Length", source) : null
             ),
-            PointerType { ElemType: { Name: "Span`1" or "ReadOnlySpan`1" } type } when type.IsCorelibType() => (
+            PointerType pointer when RuntimeLibrary.IsSpanType(pointer.ElemType) => (
                 builder.CreateCallVirt("GetPinnableReference", source),
                 getCount ? builder.CreateCallVirt("get_Length", source) : null
             ),

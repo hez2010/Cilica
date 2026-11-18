@@ -144,6 +144,35 @@ public class ScalarReplacementTests(ModuleResolverFixture fixture) : PassTestBas
     }
 
     [Theory]
+    [InlineData(2)]
+    [InlineData(8)]
+    public void FieldLoadsRespectSequentialFieldExtents(int bytes)
+    {
+        var body = Utils.CreateTestMethod(_modResolver, PrimType.Int64);
+        var pair = body.Definition.Module.CreateType(null, "Pair", TypeAttributes.SequentialLayout);
+        var low = pair.CreateField("Low", PrimType.Int32);
+        var high = pair.CreateField("High", PrimType.Int32);
+        var ctor = pair.CreateMethod(".ctor", PrimType.Void, [new ParamDef(pair, "this")],
+            MethodAttributes.Public | MethodAttributes.SpecialName | MethodAttributes.RTSpecialName);
+        ctor.Body = new MethodBody(ctor);
+        var cb = new IRBuilder(ctor.Body.CreateBlock());
+        cb.CreateCall(_modResolver.Import(typeof(object)).FindMethod(".ctor"), ctor.Body.Args[0]);
+        cb.CreateReturn();
+        var ib = new IRBuilder(body.CreateBlock());
+        var obj = ib.CreateNewObj(ctor);
+        ib.CreateFieldStore(low, obj, ConstInt.CreateI(2));
+        ib.CreateFieldStore(high, obj, ConstInt.CreateI(1));
+        var read = ib.CreateLoad(ib.CreateFieldAddr(low, obj), bytes == 8 ? PrimType.Int64 : PrimType.UInt16, PointerFlags.Unaligned);
+        ib.CreateReturn(ib.CreateConvert(read, PrimType.Int64));
+        Run(body, new ScalarReplacement());
+        Assert.Equal(bytes == 8, obj.Block != null);
+        long expected = bytes == 8
+            ? BitConverter.ToInt64([.. BitConverter.GetBytes(2), .. BitConverter.GetBytes(1)])
+            : BitConverter.ToUInt16(BitConverter.GetBytes(2));
+        Assert.Equal(expected, Utils.Compile<Func<long>>(body)());
+    }
+
+    [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
     [InlineData(false, true)]

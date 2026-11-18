@@ -28,6 +28,72 @@ public class ArrayRuntimeTests
     }
 
     [Fact]
+    public void GenericArrayStoresAreVisibleThroughConcreteAliases()
+    {
+        int[] values = [10];
+        Assert.Equal(7, DifferenceAfterStore(values, values, 17));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static int DifferenceAfterStore<T>(int[] before, T[] after, T value)
+    {
+        int first = before[0];
+        after[0] = value;
+        return before[0] - first;
+    }
+
+    [Fact]
+    public void ReassignedSpanIsReadOnTheNextIteration()
+    {
+        Span<int> span = new int[] { 1, 2, 3 };
+        Assert.Equal(12, SumReplacingSpan(ref span, ref span, new int[] { 4, 5, 6 }));
+    }
+
+    [Theory, CheckCodeGenAfterRun]
+    [InlineData(0)]
+    [InlineData(7)]
+    [InlineData(35)]
+    public void SlicedSpansVectorizeAfterAnEarlyReturn(int start)
+    {
+        if (start < 0) return;
+        int[] values = Enumerable.Range(1, 35).ToArray();
+        Span<int> slice = values.AsSpan(start);
+        int sum = 0;
+        for (int i = 0; i < slice.Length; i++) sum += slice[i];
+        Assert.Equal((35 * 36 - start * (start + 1)) / 2, sum);
+        // CHECK: Vector256::Sum
+    }
+
+    [Fact]
+    public void SavedSpanLengthSurvivesReassignmentBeforeTheLoop()
+    {
+        Span<int> first = new[] { 10, 20 };
+        Assert.Equal(3, SumPrefix(first, new[] { 1, 2, 3, 4 }));
+        Assert.Throws<IndexOutOfRangeException>(() => SumPrefix(new[] { 1, 2, 3, 4 }, new[] { 1, 2 }));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static int SumPrefix(Span<int> view, Span<int> replacement)
+    {
+        int length = view.Length;
+        view = replacement;
+        int sum = 0;
+        for (int i = 0; i < length; i++) sum += view[i];
+        return sum;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static int SumReplacingSpan(ref Span<int> span, ref Span<int> alias, Span<int> replacement)
+    {
+        int sum = 0;
+        for (int i = 0; i < span.Length; i++) {
+            sum += span[i];
+            alias = replacement;
+        }
+        return sum;
+    }
+
+    [Fact]
     public void CovariantArrayReadsRemainValidAcrossMutation()
     {
         object[] values = new string[] { "first" };

@@ -41,4 +41,39 @@ public sealed class MemoryAccessAnalysis : IMethodAnalysis
 
         return writes.AsSpan(start, end - start);
     }
+
+    internal bool HasWrite(BasicBlock block, Func<Instruction, bool> clobbers, Instruction? after = null, Instruction? before = null)
+    {
+        foreach (var write in GetPotentialWrites(block, after, before)) {
+            if (write.Block != null && clobbers(write)) return true;
+        }
+        return false;
+    }
+
+    // The definition dominates the use. Revisiting the use block through a backedge includes all its writes.
+    internal bool IsUnchangedBetween(Instruction def, BasicBlock useBlock, Instruction? use, Func<Instruction, bool> clobbers)
+    {
+        if (def.Block == useBlock) return !HasWrite(useBlock, clobbers, def, use);
+        if (HasWrite(useBlock, clobbers, before: use)) return false;
+
+        var pending = new DiscreteStack<BasicBlock>();
+        foreach (var pred in useBlock.Preds) pending.Push(pred);
+        while (pending.TryPop(out var block)) {
+            if (HasWrite(block, clobbers, after: block == def.Block ? def : null)) return false;
+            if (block != def.Block) {
+                foreach (var pred in block.Preds) pending.Push(pred);
+            }
+        }
+        return true;
+    }
+
+    // Two distinct reads that dominate a common use are ordered along its dominator chain.
+    internal bool IsUnchangedBetween(Instruction first, Instruction second, DominatorTree dominators, Func<Instruction, bool> clobbers)
+    {
+        bool inOrder = first.Block == second.Block
+            ? _positions[first].After <= _positions[second].Before
+            : dominators.Dominates(first.Block, second.Block);
+        if (!inOrder) (first, second) = (second, first);
+        return IsUnchangedBetween(first, second.Block, second, clobbers);
+    }
 }

@@ -8,6 +8,12 @@ public sealed class RuntimeLibrary(ModuleResolver resolver)
 {
     public ModuleResolver Resolver { get; } = resolver;
 
+    internal static bool IsSpanType(TypeDesc type)
+        => type.Name is "Span`1" or "ReadOnlySpan`1" && type.IsCorelibType();
+
+    internal static bool IsSpanAccessor(MethodDesc method)
+        => method.Name is "get_Length" or "get_Item" or "GetPinnableReference" && IsSpanType(method.DeclaringType);
+
     // Sequence optimizations consume these calls directly.
     internal bool IsOptimizationIntrinsic(MethodDef method)
     {
