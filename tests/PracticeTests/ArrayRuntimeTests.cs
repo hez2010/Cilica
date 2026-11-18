@@ -94,6 +94,30 @@ public class ArrayRuntimeTests
     }
 
     [Fact]
+    public void WritableArrayReferencesCheckTheRuntimeElementType()
+    {
+        object[] values = new string[] { "first" };
+        values[0] = "second";
+        Assert.Equal("second", values[0]);
+        Assert.Throws<ArrayTypeMismatchException>(() => ReadWritable(values));
+        Assert.Throws<ArrayTypeMismatchException>(() => WriteWritable(values));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static object ReadWritable(object[] values)
+    {
+        ref object element = ref values[0];
+        return element;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static void WriteWritable(object[] values)
+    {
+        ref object element = ref values[0];
+        element = "third";
+    }
+
+    [Fact]
     public void CovariantArrayReadsRemainValidAcrossMutation()
     {
         object[] values = new string[] { "first" };

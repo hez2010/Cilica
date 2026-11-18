@@ -35,6 +35,14 @@ internal sealed class CilPreparation
     private static void Legalize(MethodBody method)
     {
         foreach (var inst in method.Instructions().ToArray()) {
+            if (inst is StoreInst { Flags: 0, Address: ArrayAddrInst { TypeCheck: ArrayTypeCheck.StoredValue } location } indexedStore &&
+                indexedStore.ElemType == location.ElemType) {
+                indexedStore.ReplaceWith(new CilIntrinsic.ArrayStore(indexedStore.ElemType, location.Array, location.Index, indexedStore.Value) {
+                    DebugLocation = indexedStore.DebugLocation
+                }, insertIfInst: true);
+                if (location.NumUses == 0) location.Remove();
+                continue;
+            }
             if (inst is CilIntrinsic.InitializeArray arrayInitialization) {
                 PrepareArrayInitialization(arrayInitialization);
                 continue;

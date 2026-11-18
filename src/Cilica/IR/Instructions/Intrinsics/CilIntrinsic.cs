@@ -133,6 +133,14 @@ public abstract class CilIntrinsic : IntrinsicInst
         public override bool MayThrow => true;
     }
 
+    internal sealed class ArrayStore(TypeDesc element, Value array, Value index, Value value)
+        : CilIntrinsic(PrimType.Void, [element], [array, index, value])
+    {
+        public override ILCode Opcode => ILCode.Stelem;
+        public override bool MayThrow => true;
+        public override bool MayWriteToMemory => true;
+    }
+
     /// <summary> T CastClass&lt;T&gt;(object obj) </summary>
     public class CastClass(TypeDesc destType, Value obj) : CilIntrinsic(destType, [obj])
     {

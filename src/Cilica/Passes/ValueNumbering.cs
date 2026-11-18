@@ -180,7 +180,7 @@ public class ValueNumbering : IMethodPass
         );
         Reg<ArrayAddrInst>(
             comp: (a, b) => a.Array.Equals(b.Array) && a.Index.Equals(b.Index) && a.ElemType == b.ElemType && 
-                            a.InBounds == b.InBounds && a.IsReadOnly == b.IsReadOnly,
+                            a.InBounds == b.InBounds && a.IsReadOnly == b.IsReadOnly && a.TypeCheck == b.TypeCheck,
             hash: (inst) => HashCode.Combine(inst.Array, inst.Index, 1234)
         );
         Reg<PtrOffsetInst>(

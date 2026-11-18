@@ -257,7 +257,7 @@ public class IRCloner
         public void Visit(FieldExtractInst inst) => Out(new FieldExtractInst(Remap(inst.Field), Remap(inst.Obj)));
         public void Visit(FieldInsertInst inst) => Out(new FieldInsertInst(Remap(inst.Field), Remap(inst.Obj), Remap(inst.NewValue)));
 
-        public void Visit(ArrayAddrInst inst) => Out(new ArrayAddrInst(Remap(inst.Array), Remap(inst.Index), Remap(inst.ElemType), inst.InBounds, inst.IsReadOnly));
+        public void Visit(ArrayAddrInst inst) => Out(new ArrayAddrInst(Remap(inst.Array), Remap(inst.Index), Remap(inst.ElemType), inst.InBounds, inst.IsReadOnly) { IsStoreLocation = inst.IsStoreLocation });
 
         public void Visit(FieldAddrInst inst) => Out(new FieldAddrInst(Remap(inst.Field), inst.IsStatic ? null : Remap(inst.Obj), inst.InBounds));
 

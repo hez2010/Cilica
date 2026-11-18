@@ -33,15 +33,28 @@ public class ArrayAddrInst : AddressInst
 
     private bool _isReadOnly;
 
+    // An indexed store checks the stored value against the runtime element type.
+    // Taking a writable managed reference requires an exact element type.
+    internal bool IsStoreLocation { get; init; }
+
     /// <summary> Checks if <see cref="AddressInst.ElemType"/> differs from the array type. </summary>
     public bool IsCasting => ElemType != Array.ResultType.ElemType;
 
     /// <summary> Whether taking a writable address requires a runtime array variance check. </summary>
-    public bool RequiresVarianceCheck => !IsReadOnly && !ElemType.IsValueType &&
-        !(Array is CilIntrinsic.NewArray allocation && allocation.ElemType == ElemType);
+    public bool RequiresVarianceCheck => TypeCheck != ArrayTypeCheck.None;
 
-    public override bool MayThrow => !InBounds;
-    public override string InstName => "arraddr" + (IsReadOnly ? ".readonly" : "") + (InBounds ? ".inbounds" : "");
+    internal ArrayTypeCheck TypeCheck {
+        get {
+            if (IsReadOnly || ElemType.IsValueType || Array is CilIntrinsic.NewArray allocation && allocation.ElemType == ElemType ||
+                Array.ResultType is ArrayType array && array.ElemType == ElemType && (ElemType.Kind == TypeKind.String || TypeUtils.IsExactType(ElemType))) {
+                return ArrayTypeCheck.None;
+            }
+            return IsStoreLocation ? ArrayTypeCheck.StoredValue : ArrayTypeCheck.WritableReference;
+        }
+    }
+
+    public override bool MayThrow => !InBounds || TypeCheck == ArrayTypeCheck.WritableReference;
+    public override string InstName => "arraddr" + (IsStoreLocation ? ".store" : "") + (IsReadOnly ? ".readonly" : "") + (InBounds ? ".inbounds" : "");
 
     public ArrayAddrInst(Value array, Value index, TypeDesc? elemType = null, bool inBounds = false, bool readOnly = false)
         : base(array, index)
@@ -54,6 +67,8 @@ public class ArrayAddrInst : AddressInst
 
     public override void Accept(InstVisitor visitor) => visitor.Visit(this);
 }
+
+internal enum ArrayTypeCheck { None, WritableReference, StoredValue }
 
 public class FieldAddrInst : AddressInst
 {

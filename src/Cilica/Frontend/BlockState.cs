@@ -773,7 +773,7 @@ internal class BlockState
     private void ImportStoreElem(TypeDesc? elemType)
     {
         var value = Pop();
-        var addr = EmitArrayAddress(elemType);
+        var addr = EmitArrayAddress(elemType, storeLocation: true);
 
         Emit(new StoreInst(addr, value));
     }
@@ -781,7 +781,7 @@ internal class BlockState
     {
         PushNoEmit(EmitArrayAddress(elemType, preserveType: true));
     }
-    private AddressInst EmitArrayAddress(TypeDesc? elemType, bool preserveType = false, bool readOnly = false)
+    private AddressInst EmitArrayAddress(TypeDesc? elemType, bool preserveType = false, bool readOnly = false, bool storeLocation = false)
     {
         var index = Pop();
         var array = Pop();
@@ -789,7 +789,7 @@ internal class BlockState
         var inst = new ArrayAddrInst(
             array, index, NormalizeStorageType(elemType, array.ResultType, inferUnsigned: !preserveType),
             inBounds: HasPrefix(InstFlags.NoRangeCheck | InstFlags.NoNullCheck),
-            readOnly: readOnly || HasPrefix(InstFlags.Readonly));
+            readOnly: readOnly || HasPrefix(InstFlags.Readonly)) { IsStoreLocation = storeLocation };
         Emit(inst);
         return inst;
     }

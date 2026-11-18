@@ -77,7 +77,7 @@ partial class ILGenerator
         // indirect form so volatile ordering and alignment are preserved.
         if (inst.Flags != 0) return false;
         if (inst.Address is AddressInst addr && addr.ElemType == inst.ElemType && _forest.IsLeaf(addr)) {
-            if (addr is ArrayAddrInst arrayAddr) {
+            if (addr is ArrayAddrInst { RequiresVarianceCheck: false } arrayAddr) {
                 EmitLoadOrStoreArray(arrayAddr, valToStore);
                 return true;
             }
@@ -276,6 +276,7 @@ partial class ILGenerator
                 _asm.Emit(op, op == ILCode.Unbox ? inst.ResultType.ElemType! : inst.ResultType);
                 break;
             }
+            case ILCode.Stelem:
             case ILCode.Isinst:
             case ILCode.Box:
             case ILCode.Ldtoken:

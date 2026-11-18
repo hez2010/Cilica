@@ -560,7 +560,7 @@ public partial class IRParser
             array, index, 
             elemType: ((ByrefType)type).ElemType,
             inBounds: mods.HasFlag(OpcodeModifiers.InBounds),
-            readOnly: mods.HasFlag(OpcodeModifiers.ReadOnly));
+            readOnly: mods.HasFlag(OpcodeModifiers.ReadOnly)) { IsStoreLocation = mods.HasFlag(OpcodeModifiers.Store) };
     }
 
     private Instruction ParseLea()

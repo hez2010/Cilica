@@ -273,7 +273,7 @@ public class IRBuilder
 
     public StoreInst CreateArrayStore(Value array, Value index, Value value, TypeDesc? elemType = null, bool inBounds = false)
     {
-        var addr = CreateArrayAddr(array, index, elemType, inBounds);
+        var addr = Emit(new ArrayAddrInst(array, index, elemType, inBounds) { IsStoreLocation = true });
         return CreateStore(addr, value);
     }
 

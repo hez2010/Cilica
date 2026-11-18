@@ -57,6 +57,7 @@ internal enum OpcodeModifiers
     ReadOnly    = 1 << 4,
     NonNull     = 1 << 5,
     Tail        = 1 << 6,
+    Store       = 1 << 7,
 }
 internal static class Opcodes
 {
@@ -160,6 +161,7 @@ internal static class Opcodes
                (str.Contains(".un")         ? OpcodeModifiers.Un : 0) |
                (str.Contains(".volatile")   ? OpcodeModifiers.Volatile : 0) |
                (str.Contains(".inbounds")   ? OpcodeModifiers.InBounds : 0) |
+               (str.Contains(".store")      ? OpcodeModifiers.Store : 0) |
                (str.Contains(".readonly")   ? OpcodeModifiers.ReadOnly : 0) |
                (str.Contains(".nonnull")    ? OpcodeModifiers.NonNull : 0) |
                (str.Contains(".tail")       ? OpcodeModifiers.Tail : 0);
