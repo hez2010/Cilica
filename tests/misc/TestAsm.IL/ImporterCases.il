@@ -1,5 +1,64 @@
 .class public ImporterCases
 {
+    .method public static int32 JoinedSmallIntegers(bool chooseByte, int8 s, uint8 u)
+    {
+        ldarg.0
+        brtrue.s unsignedValue
+        ldarg.1
+        br.s useValue
+    unsignedValue:
+        ldarg.2
+    useValue:
+        dup
+        ldc.i4.0
+        cgt
+        add
+        ret
+    }
+
+    .method public static int32 ByteArgument(uint8 arg)
+    {
+        ldarg.0
+        ret
+    }
+
+    .method public static int32 PassSignedConstantToByte()
+    {
+        ldc.i4.m1
+        conv.i1
+        call int32 ImporterCases::ByteArgument(uint8)
+        ret
+    }
+
+    .method public static int32 DiscardSignedDivision(int32 dividend)
+    {
+        ldarg.0
+        ldc.i4.m1
+        conv.u4
+        div
+        pop
+        ldc.i4.7
+        ret
+    }
+
+    .method public static int32 ReadAroundNarrowIndexStore(int32[] items)
+    {
+        .maxstack 4
+        ldarg.0
+        ldc.i4.0
+        ldelem.i4
+        ldarg.0
+        ldc.i4.0
+        conv.u1
+        ldc.i4.s 13
+        stelem.i4
+        ldarg.0
+        ldc.i4.0
+        ldelem.i4
+        sub
+        ret
+    }
+
     .method public static int32 LoopLocal() cil managed {
         .maxstack 3
         .locals init (int32 temp, int32 i, int32 total)

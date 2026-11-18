@@ -262,6 +262,29 @@ public class ILImporterTests(ModuleResolverFixture fixture)
 
     unsafe delegate object ReadObject(void* pointer);
 
+    [Fact]
+    public void OptimizedIntegerOperationsPreserveStackValuesAndExceptions()
+    {
+        using var resolver = new ModuleResolver();
+        resolver.AddTrustedSearchPaths();
+        var module = resolver.Load(Path.Combine(AppContext.BaseDirectory, "TestAsm.IL.dll"));
+        var type = module.FindType(null, "ImporterCases")!;
+        var compilation = new Compilation(module, new VoidLogger(), new() { VerifyEachPass = true });
+        var join = (MethodDef)type.FindMethod("JoinedSmallIntegers");
+        var passByte = (MethodDef)type.FindMethod("PassSignedConstantToByte");
+        var division = (MethodDef)type.FindMethod("DiscardSignedDivision");
+        var indexed = (MethodDef)type.FindMethod("ReadAroundNarrowIndexStore");
+        CompilationPipeline.CreateDefault(compilation).Run([join, passByte, division, indexed]).ThrowIfFailed();
+        var select = Utils.Compile<Func<bool, sbyte, byte, int>>(join.Body!);
+        Assert.Equal(-1, select(false, -1, 255));
+        Assert.Equal(256, select(true, -1, 255));
+        Assert.Equal(255, Utils.Compile<Func<int>>(passByte.Body!)());
+        var divide = Utils.Compile<Func<int, int>>(division.Body!);
+        Assert.Equal(7, divide(0));
+        Assert.Throws<OverflowException>(() => divide(int.MinValue));
+        Assert.Equal(-13, Utils.Compile<Func<int[], int>>(indexed.Body!)([0]));
+    }
+
     [Theory]
     [InlineData("LoopLocal")]
     [InlineData("AddressLoop")]
