@@ -18,7 +18,7 @@ internal class AggregationSink : LinqSink
     {
         if (_hasData != null) {
             // goto hasData ? Exit : ThrowHelper
-            builder.ThrowEmptySequence(noMatch: false, builder.CreateEq(_hasData, ConstInt.CreateI(0)));
+            builder.ForkIf(_hasData, builder.CreateEmptySequenceThrow(noMatch: false), negate: true);
         }
         Result = _accumulator;
     }

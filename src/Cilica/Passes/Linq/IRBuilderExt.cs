@@ -26,17 +26,13 @@ internal static class IRBuilderExt
         return ib.CreateCallVirt(invoker, lambda, currItem);
     }
 
-    public static void ThrowEmptySequence(this IRBuilder ib, bool noMatch, Value? cond = null)
+    public static BasicBlock CreateEmptySequenceThrow(this IRBuilder ib, bool noMatch)
     {
         var helpers = ib.Resolver.Resolve("System.Linq").FindType("System.Linq", "ThrowHelper", throwIfNotFound: true);
         var throwHelper = ib.Method.CreateBlock().SetName("LQ_ThrowHelper");
         new IRBuilder(throwHelper).CreateCall(helpers.FindMethod(noMatch ? "ThrowNoMatchException" : "ThrowNoElementsException"));
         throwHelper.InsertLast(new ThrowInst(ConstNull.Create()));
 
-        if (cond == null) {
-            ib.SetBranch(throwHelper);
-        } else {
-            ib.ForkIf(ib.CreateNe(cond, Const.CreateZero(cond.ResultType)), throwHelper);
-        }
+        return throwHelper;
     }
 }

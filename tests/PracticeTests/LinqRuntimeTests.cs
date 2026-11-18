@@ -79,7 +79,22 @@ public class LinqRuntimeTests
             sum => sum + 100 * sequence.Disposals));
     }
 
-    sealed class DisposableSequence : IEnumerable<int>, IEnumerator<int>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void FirstDisposesBeforeReportingNoResult(bool usePredicate)
+    {
+        var sequence = new DisposableSequence(empty: !usePredicate);
+        bool caught = false;
+        try {
+            _ = usePredicate ? sequence.First(x => x < 0) : sequence.First();
+        } catch (InvalidOperationException) when (sequence.Disposals == 1) {
+            caught = true;
+        }
+        Assert.True(caught);
+    }
+
+    sealed class DisposableSequence(bool empty = false) : IEnumerable<int>, IEnumerator<int>
     {
         public int Disposals;
         bool _started;
@@ -87,7 +102,7 @@ public class LinqRuntimeTests
         System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
         public int Current => 7;
         object System.Collections.IEnumerator.Current => Current;
-        public bool MoveNext() { bool first = !_started; _started = true; return first; }
+        public bool MoveNext() { bool first = !_started; _started = true; return first && !empty; }
         public void Dispose() => Disposals++;
         public void Reset() => throw new NotSupportedException();
     }

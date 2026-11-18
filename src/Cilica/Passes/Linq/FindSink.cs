@@ -33,7 +33,8 @@ internal class FindSink : LinqSink
                 : loopData.PreHeader.CreateDefaultOf(type);
             loopData.PreHeader.CreateStore(resultSlot, defaultValue);
         } else {
-            exit.ThrowEmptySequence(noMatch: HasPredicate);
+            var failure = exit.CreateEmptySequenceThrow(noMatch: HasPredicate);
+            exit.SetBranch(loopData.Enumeration?.SourceExitTarget(failure) ?? failure);
             exit.SetPosition(exit.Method.CreateBlock(insertAfter: exit.Block));
         }
         builder.CreateStore(resultSlot, currItem);

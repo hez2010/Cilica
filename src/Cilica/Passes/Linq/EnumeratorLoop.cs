@@ -70,6 +70,10 @@ internal sealed class EnumeratorLoop
         return bridge;
     }
 
+    // Exhausting the outer source has already left each inner enumeration.
+    public BasicBlock SourceExitTarget(BasicBlock target)
+        => _isRoot ? GetExitTarget(target, exitRoot: true) : _parent?.SourceExitTarget(target) ?? target;
+
     public void Finish(BasicBlock continuation)
     {
         _loop.Exit.Block.SetBranch(new LeaveInst(continuation));
