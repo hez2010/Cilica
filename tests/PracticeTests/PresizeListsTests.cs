@@ -7,6 +7,73 @@ using Cilica.Attributes;
 [Optimize, CheckCodeGenAfterRun]
 public class PresizeListsTests
 {
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(0)]
+    [InlineData(5)]
+    public void ArrayBuildersWriteEmptyAndNonemptyResultsDirectly(int count)
+    {
+        var list = new List<int>();
+        for (int i = 0; i < count; i++) list.Add(i);
+        var result = list.ToArray();
+        Assert.Equal(Math.Max(0, count), result.Length);
+        for (int i = 0; i < result.Length; i++) Assert.Equal(i, result[i]);
+        // CHECK: CIL::NewArray
+        // CHECK-NOT: ::ToArray(
+    }
+
+    [Theory]
+    [InlineData((ushort)0)]
+    [InlineData((ushort)35)]
+    public void SmallUnsignedCountsBuildArraysDirectly(ushort count)
+    {
+        var list = new List<int>();
+        for (uint i = 0; i < count; i++) list.Add((int)i);
+        Assert.Equal(Enumerable.Range(0, count), list.ToArray());
+        // CHECK: CIL::NewArray
+        // CHECK-NOT: ::ToArray(
+    }
+
+    [Theory]
+    [InlineData(uint.MaxValue)]
+    public void LargeUnsignedCountsReachTheFirstAppend(uint count)
+    {
+        bool reachedAppend = false;
+        try {
+            var list = new List<int>();
+            for (uint i = 0; i < count; i++) list.Add(Produce());
+            GC.KeepAlive(list.ToArray());
+        } catch (InvalidOperationException) {
+            reachedAppend = true;
+        }
+        Assert.True(reachedAppend);
+        // CHECK: newobj List`1[int]::.ctor(int:
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static int Produce() => throw new InvalidOperationException();
+    }
+
+    [Fact]
+    public void NestedLoopsKeepTheirListAndEachSnapshotOwnsItsElements()
+    {
+        var items = new List<int>();
+        int total = 0;
+        for (int j = 0; j < 3; j++) {
+            int count = 2 + j;
+            for (int i = 0; i < count; i++) items.Add(i);
+            total += items.Count;
+        }
+        Assert.Equal(16, total);
+
+        var source = new List<int>();
+        for (int i = 0; i < 4; i++) source.Add(7);
+        for (int j = 0; j < 3; j++) {
+            var snapshot = source.ToArray();
+            Assert.Equal(7, snapshot[0]);
+            snapshot[0] = 0;
+        }
+    }
+
     [Fact]
     public void EnumerationDoesNotReadUserCountGetters()
     {
@@ -60,8 +127,6 @@ public class PresizeListsTests
         for (int i = 0; i < count; i++) { list.Add(i); list.Add(i + 100); }
         var actual = list.ToArray();
         Assert.Equal(count > 0 ? new[] { 0, 100, 1, 101, 2, 102 } : Array.Empty<int>(), actual);
-        // CHECK: mul
-        // CHECK-SAME: 2L
         // CHECK: select
         // CHECK: Add(
         // CHECK: Add(

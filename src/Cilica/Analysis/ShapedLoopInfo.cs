@@ -37,6 +37,9 @@ public class ShapedLoopInfo
     /// <param name="builder"> An optional builder where the trip count calculation code will be emitted. </param>
     public virtual Value? GetTripCount(IRBuilder? builder) => null;
 
+    // Collection counts and signed int32 induction are bounded by Int32.MaxValue.
+    internal virtual uint MaxTripCount => int.MaxValue;
+
     public static ShapedLoopInfo? Parse(LoopInfo loop)
     {
         var exitCond = loop.GetExitCondition();
@@ -93,7 +96,7 @@ public class CountingLoopInfo : ShapedLoopInfo
     public object? GetStride()
     {
         if (UpdatedCounter is BinaryInst { Op: BinaryOp.Add, Right: ConstInt v } bin && bin.Left == Counter) {
-            return checked((int)v.Value);
+            return v.SignedStackValue is >= int.MinValue and <= int.MaxValue ? (int)v.SignedStackValue : null;
         }
         if (UpdatedCounter is PtrOffsetInst { Index: ConstInt { Value: 1 } } lea && lea.BasePtr == Counter) {
             return lea.KnownStride ? lea.Stride : lea.ElemType;
@@ -133,6 +136,16 @@ public class CountingLoopInfo : ShapedLoopInfo
         }
         return ExitCondition.Op.IsSigned() && builder != null
             ? builder.CreateMax(End, ConstInt.CreateI(0)) : End;
+    }
+
+    internal override uint MaxTripCount {
+        get {
+            bool unsigned = ExitCondition.Op == CompareOp.Ult;
+            if (End is ConstInt count) return unsigned ? (uint)count.UnsignedStackValue : (uint)Math.Max(0, count.SignedStackValue);
+            var kind = End.ResultType.Kind;
+            if (kind.IsSmallInt() && kind.IsUnsigned()) return (1u << kind.BitSize()) - 1;
+            return unsigned && GetSourceArray() == null ? uint.MaxValue : int.MaxValue;
+        }
     }
 
     protected override bool Parse()

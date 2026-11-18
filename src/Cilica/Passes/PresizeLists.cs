@@ -37,7 +37,8 @@ public class PresizeLists : IMethodPass
                     // the block it is defined in dominates the loop latch.
                     // We could probably speculate a reasonable initial capacity given
                     // PGO data, but that's thinking way ahead :')
-                    if (domTree.Dominates(inst.Block, loop.Latch)) {
+                    if (inst.Block != loop.Header && domTree.Dominates(inst.Block, loop.Latch) &&
+                        !ControlFlowFacts.CanRepeatWithout(inst.Block, loop.Header)) {
                         info.AddCallCount++;
                     } else {
                         info.HasConditionalAdd = true;
@@ -56,25 +57,13 @@ public class PresizeLists : IMethodPass
                 }
 
                 var builder = new IRBuilder(loop.PreHeader);
-                var tripCount = loop.GetTripCount(builder)!;
-                bool fitsCapacity = info.AddCallCount == 1 || tripCount is ConstInt constant &&
-                    constant.Value <= int.MaxValue / info.AddCallCount;
-                Value numAddedItems;
-
-                if (fitsCapacity) {
-                    numAddedItems = builder.CreateMul(tripCount, ConstInt.CreateI(info.AddCallCount));
-                } else {
-                    var wide = builder.CreateMul(builder.CreateConvert(tripCount, PrimType.Int64), ConstInt.CreateL(info.AddCallCount));
-                    numAddedItems = builder.CreateSelect(builder.CreateSle(wide, ConstInt.CreateL(int.MaxValue)),
-                        builder.CreateConvert(wide, PrimType.Int32), ConstInt.CreateI(0));
-                }
-
+                var (capacity, exact) = GetCapacity(loop, info.AddCallCount, builder);
                 var ctorWithCap = list.ResultType.FindMethod(".ctor", new MethodSig(PrimType.Void, [PrimType.Int32]));
-                var newList = builder.CreateNewObj(ctorWithCap, numAddedItems);
-                ctx.Logger.Trace($"Presized '{listAlloc}' in '{listAlloc.Block}' to capacity '{numAddedItems}' for loop '{loop.Header}'.");
+                var newList = builder.CreateNewObj(ctorWithCap, capacity);
+                ctx.Logger.Trace($"Presized '{listAlloc}' in '{listAlloc.Block}' to capacity '{capacity}' for loop '{loop.Header}'.");
                 listAlloc.ReplaceWith(newList);
 
-                if (!info.HasConditionalAdd && fitsCapacity) {
+                if (!info.HasConditionalAdd && exact) {
                     TryReplaceArrayBuilder(loop, builder, newList, domTree, ctx.Logger);
                 }
 
@@ -85,6 +74,16 @@ public class PresizeLists : IMethodPass
         }
 
         return numChanges > 0 ? MethodInvalidations.DataFlow : MethodInvalidations.None;
+    }
+
+    private static (Value Capacity, bool Exact) GetCapacity(ShapedLoopInfo loop, int addsPerIteration, IRBuilder builder)
+    {
+        int limit = int.MaxValue / addsPerIteration;
+        var trips = builder.CreateConvert(loop.GetTripCount(builder)!, PrimType.Int32);
+        var capacity = builder.CreateMul(trips, ConstInt.CreateI(addsPerIteration));
+        if (loop.MaxTripCount <= limit) return (capacity, true);
+        // A count beyond the allocation limit leaves growth to List.Add.
+        return (builder.CreateSelect(builder.CreateUle(trips, ConstInt.CreateI(limit)), capacity, ConstInt.CreateI(0)), false);
     }
 
     private static bool IsConfined(TrackedValue list)
@@ -118,9 +117,9 @@ public class PresizeLists : IMethodPass
             }
         }
 
-        var continuation = loop.Exit.Last is LeaveInst leave ? leave.Target : loop.Exit;
         if (toArrayCall == null || numToArrayCalls != 1 || numOtherUses != 0 ||
-            !domTree.Dominates(continuation, toArrayCall.Block) ||
+            !domTree.Dominates(loop.Exit, toArrayCall.Block) ||
+            ControlFlowFacts.CanRepeatWithout(toArrayCall.Block, builder.Block) ||
             list is not NewObjInst { Args: [{ ResultType.Kind: TypeKind.Int32 }] } listAlloc) return false;
 
         var elemType = list.ResultType.GenericParams[0];
@@ -159,6 +158,7 @@ public class PresizeLists : IMethodPass
     // Checks if `alloc` can be moved to after `inst`
     private static bool CanSinkAlloc(NewObjInst alloc, Instruction inst, DominatorTree domTree, ProtectedRegionAnalysis regions)
     {
+        if (ControlFlowFacts.CanRepeatWithout(inst.Block, alloc.Block)) return false;
         var sourceRegion = regions.GetBlockRegion(alloc.Block);
         for (var region = regions.GetBlockRegion(inst.Block); region != sourceRegion; region = region.Parent) {
             if (region == null || region.GetHandlerGuard() != null ||
