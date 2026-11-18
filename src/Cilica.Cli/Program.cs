@@ -168,15 +168,16 @@ static Predicate<MethodDef>? CompileFilter(string? pattern)
 
     // Pattern :=  (ClassName  "::")? MethodName ( "(" Seq{TypeName} ")" )?  ("|" Pattern)?
     pattern = string.Join("|", pattern.Split('|').Select(part => {
-        var tokens = Regex.Match(part, @"^(?:(.+)::)?(.+?)(?:\((.+)\))?$");
+        var tokens = Regex.Match(part, @"^(?:(.+)::)?(.+?)(?:\((.*)\))?$");
 
         var typeToken = WildcardToRegex(tokens.Groups[1].Value);
         var methodToken = WildcardToRegex(tokens.Groups[2].Value);
-        var sigToken = WildcardToRegex(tokens.Groups[3].Value, true);
+        var parameters = tokens.Groups[3];
+        var sigToken = parameters.Success && parameters.Length == 0 ? "" : WildcardToRegex(parameters.Value, true);
 
         return @$"(?:{typeToken}::{methodToken}\({sigToken}\))";
     }));
-    var regex = new Regex("^" + pattern + "$", RegexOptions.CultureInvariant);
+    var regex = new Regex(@"\A(?:" + pattern + @")\z", RegexOptions.CultureInvariant);
 
     return (m) => regex.IsMatch(RenderMethodSig(m));
 
