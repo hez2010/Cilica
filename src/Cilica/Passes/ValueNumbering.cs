@@ -44,6 +44,7 @@ public class ValueNumbering : IMethodPass
         public bool Process(Instruction inst)
         {
             if (!s_Taggers.ContainsKey(inst.GetType())) return false;
+            if (inst is IntrinsicInst { MayWriteToMemory: true } and not CilIntrinsic.Initialization) return false;
             if (inst is MemoryInst { IsVolatile: true } || inst is StoreInst { IsCasting: true }) return false;
 
             var availDefs = _availMap.GetOrAddRef(inst) ??= new();

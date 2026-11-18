@@ -2,6 +2,7 @@ namespace Cilica.PracticeTests;
 
 using Cilica.Attributes;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 [Optimize]
 public class ArrayRuntimeTests
@@ -25,6 +26,30 @@ public class ArrayRuntimeTests
         var values = new int[count];
         for (int i = 0; i < values.Length; i++) values[i] = i + 1;
         return values;
+    }
+
+    interface IOptional { }
+
+    sealed class DynamicReceiver : IDynamicInterfaceCastable
+    {
+        public int Tests;
+        public bool IsInterfaceImplemented(RuntimeTypeHandle type, bool throwIfNotImplemented) => ++Tests == 1;
+        public RuntimeTypeHandle GetInterfaceImplementation(RuntimeTypeHandle type) => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public void DynamicInterfaceTestsRunEachTime()
+    {
+        var value = new DynamicReceiver();
+        Assert.Equal(10, TestTwice(value));
+        Assert.Equal(2, value.Tests);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static int TestTwice(object value)
+    {
+        int first = value is IOptional ? 10 : 0;
+        return first + (value is IOptional ? 1 : 0);
     }
 
     [Fact]

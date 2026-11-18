@@ -141,23 +141,34 @@ public abstract class CilIntrinsic : IntrinsicInst
         public override bool MayWriteToMemory => true;
     }
 
+    public abstract class TypeCast(TypeDesc result, EntityDesc[] types, Value obj) : CilIntrinsic(result, types, [obj])
+    {
+        public abstract TypeDesc DestType { get; }
+        // An interface test can call IDynamicInterfaceCastable on the receiver.
+        protected bool CanInvokeUserCode => DestType.IsInterface || DestType is GenericParamType;
+        public override bool MayReadFromMemory => CanInvokeUserCode;
+        public override bool MayWriteToMemory => CanInvokeUserCode;
+        public override bool IsMemoryBarrier => CanInvokeUserCode;
+    }
+
     /// <summary> T CastClass&lt;T&gt;(object obj) </summary>
-    public class CastClass(TypeDesc destType, Value obj) : CilIntrinsic(destType, [obj])
+    public class CastClass(TypeDesc destType, Value obj) : TypeCast(destType, [], obj)
     {
         public override ILCode Opcode => ILCode.Castclass;
         public override bool MayThrow => true;
-        public TypeDesc DestType => ResultType;
+        public override TypeDesc DestType => ResultType;
     }
 
     /// <summary> (object?)T AsInstance&lt;T&gt;(object obj) </summary>
-    public class AsInstance(TypeDesc destType, Value obj) : CilIntrinsic(GetResultType(destType), [destType], [obj])
+    public class AsInstance(TypeDesc destType, Value obj) : TypeCast(GetResultType(destType), [destType], obj)
     {
         public override ILCode Opcode => ILCode.Isinst;
-        public TypeDesc DestType => (TypeDesc)StaticArgs[0];
+        public override TypeDesc DestType => (TypeDesc)StaticArgs[0];
+        public override bool MayThrow => CanInvokeUserCode;
 
         // Adjust result type when cloning, because a generic parameter T may become a struct.
         protected internal override IntrinsicInst CloneWith(TypeDesc resultType, EntityDesc[] staticArgs, Value[] args)
-            => base.CloneWith(GetResultType(resultType), staticArgs, args);
+            => base.CloneWith(GetResultType((TypeDesc)staticArgs[0]), staticArgs, args);
 
         private static TypeDesc GetResultType(TypeDesc destType)
             => destType.IsValueType || destType is GenericParamType ? PrimType.Object : destType;
@@ -171,12 +182,12 @@ public abstract class CilIntrinsic : IntrinsicInst
     }
 
     /// <summary> T UnboxObj&lt;T&gt;(object obj) </summary>
-    public class UnboxObj(TypeDesc type, Value obj) : CilIntrinsic(type, [obj])
+    public class UnboxObj(TypeDesc type, Value obj) : TypeCast(type, [], obj)
     {
         public override ILCode Opcode => ILCode.Unbox_Any;
         public override bool MayThrow => true;
         public override bool MayReadFromMemory => true;
-        public TypeDesc DestType => ResultType;
+        public override TypeDesc DestType => ResultType;
     }
 
     /// <summary> T readonly&amp; UnboxRef&lt;T&gt;(object obj) </summary>
