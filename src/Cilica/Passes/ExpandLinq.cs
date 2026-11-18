@@ -25,10 +25,10 @@ public class ExpandLinq : IMethodPass
         long revision = ctx.Method.Revision;
         var queries = new List<LinqSourceNode>();
 
+        foreach (var call in ctx.Method.Instructions().OfType<CallInst>()) RemoveIdentityCast(call);
+
         foreach (var inst in ctx.Method.Instructions()) {
-            if (inst is not CallInst call) continue;
-            if (TryRemoveIdentityCast(call)) continue;
-            if (CreatePipe(call) is { } pipe) {
+            if (inst is CallInst call && CreatePipe(call) is { } pipe) {
                 // Expansion can introduce cleanup regions, which CIL filters cannot contain.
                 if (ctx.GetAnalysis<ProtectedRegionAnalysis>().GetBlockRegion(call.Block).IsFilter) continue;
                 queries.Add(pipe);
@@ -44,16 +44,15 @@ public class ExpandLinq : IMethodPass
             ctx.Method.Revision != revision ? MethodInvalidations.DataFlow : 0;
     }
 
-    private bool TryRemoveIdentityCast(CallInst call)
+    private void RemoveIdentityCast(CallInst call)
     {
-        if (call.Method.DeclaringType != t_Enumerable || call.Method.Name is not ("Cast" or "OfType")) return false;
+        if (call.Method.DeclaringType != t_Enumerable || call.Method.Name is not ("Cast" or "OfType")) return;
         var element = call.Method.GenericParams[0];
-        if (call.Method.Name == "OfType" && (!element.IsValueType || element.IsCorelibType(typeof(Nullable<>)))) return false;
+        if (call.Method.Name == "OfType" && (!element.IsValueType || element.IsCorelibType(typeof(Nullable<>)))) return;
         var source = call.Args[0];
-        if (!source.ResultType.IsAssignableTo(call.ResultType)) return false;
+        if (!source.ResultType.IsAssignableTo(call.ResultType)) return;
         LinqStageNode.ValidateArguments(call);
         call.ReplaceWith(source);
-        return true;
     }
 
     private LinqSourceNode? CreatePipe(CallInst call)
