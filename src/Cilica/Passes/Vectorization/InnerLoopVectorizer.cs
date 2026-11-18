@@ -145,7 +145,7 @@ internal sealed class InnerLoopVectorizer
                             return false;
                         }
 
-                        if (!inst.Users().All(u => IsSupportedConditionalUse(u, elemType))) {
+                        if (!inst.Uses().All(use => IsSupportedConditionalUse(use, elemType))) {
                             logger?.Trace($"Loop {_loop.Header} vectorization declined: unsupported use of boolean result {inst}.");
 
                             return false;
@@ -153,7 +153,7 @@ internal sealed class InnerLoopVectorizer
                     }
 
                     if (IsPredicatedCountStep(inst)) {
-                        var rhs = (Instruction)inst.Operands[1];
+                        if (inst.Operands[1] is not Instruction rhs || !_mappings.ContainsKey(rhs)) return false;
                         elemType = _mappings.GetRef(rhs).ElemType;
                         op = VectorOp._PredicatedCount;
                     }
@@ -345,9 +345,11 @@ internal sealed class InnerLoopVectorizer
 
         for (int i = 0; i < args.Length; i++) {
             var arg = inst.Operands[i];
-            var argumentType = mapping.TargetOp == VectorOp.I2F
-                ? new VectorShape(arg.ResultType, _width)
-                : vecType;
+            var argumentType = mapping.TargetOp switch {
+                VectorOp.I2F => new VectorShape(TypeKind.Int32, _width),
+                VectorOp.U2F => new VectorShape(TypeKind.UInt32, _width),
+                _ => vecType
+            };
             args[i] = i == 1 && mapping.TargetOp is VectorOp.Shl or VectorOp.Shra or VectorOp.Shrl
                 ? GetScalarMapping(arg)
                 : GetVectorMapping(newLoop.Body, argumentType, arg);
@@ -512,10 +514,11 @@ internal sealed class InnerLoopVectorizer
     }
 
     // Checks if we know how to vectorize a conditional (inst returning bool) with the given user
-    private static bool IsSupportedConditionalUse(Instruction user, TypeKind nominalElemType)
+    private static bool IsSupportedConditionalUse(UseRef use, TypeKind nominalElemType)
     {
+        var user = use.Parent;
         return
-            (user is SelectInst sel && sel.ResultType.Kind.Size() == nominalElemType.Size()) ||
+            (user is SelectInst sel && use.OperIndex == 0 && sel.ResultType.Kind.Size() == nominalElemType.Size()) ||
             (user is BinaryInst { Op: BinaryOp.And or BinaryOp.Or or BinaryOp.Xor, ResultType.Kind: TypeKind.Bool }) ||
             IsPredicatedCountStep(user);
     }

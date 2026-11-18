@@ -28,6 +28,46 @@ public class ArrayRuntimeTests
     }
 
     [Fact]
+    public void VectorLanesRetainScalarSignednessAndBooleanValues()
+    {
+        var signed = Enumerable.Repeat((sbyte)-1, 33).ToArray();
+        var unsigned = Enumerable.Repeat((byte)255, 33).ToArray();
+        Assert.Equal(0, CountEqual(signed, unsigned));
+
+        var floats = new float[33];
+        FillUnsigned(floats);
+        Assert.Equal((float)uint.MaxValue, floats[0]);
+        Assert.Equal(31f, floats[^1]);
+
+        var values = Enumerable.Repeat(-1, 33).ToArray();
+        FillConditional(values);
+        Assert.All(values, x => Assert.Equal(1, x));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static int CountEqual(sbyte[] a, byte[] b)
+    {
+        int count = 0;
+        for (int i = 0; i < a.Length; i++) count += a[i] == b[i] ? 1 : 0;
+        return count;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static void FillUnsigned(float[] array)
+    {
+        for (int i = 0; i < array.Length; i++) array[i] = (uint)(i - 1);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static void FillConditional(int[] array)
+    {
+        for (int i = 0; i < array.Length; i++) {
+            int x = array[i];
+            array[i] = x < 0 ? (x == -1 ? 1 : 0) : 42;
+        }
+    }
+
+    [Fact]
     public void GenericArrayStoresAreVisibleThroughConcreteAliases()
     {
         int[] values = [10];

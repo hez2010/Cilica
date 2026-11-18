@@ -99,6 +99,7 @@ internal enum VectorOp
 
     // Casting
     I2F,
+    U2F,
 
 
 
@@ -369,7 +370,8 @@ internal sealed class VectorTranslator
     private static (VectorOp Op, TypeKind ElemType) GetConvertOp(ConvertInst inst)
     {
         return (inst.SrcType, inst.DestType) switch {
-            (TypeKind.Int32, TypeKind.Single) => (VectorOp.I2F, TypeKind.Single),
+            (TypeKind.Int32 or TypeKind.UInt32, TypeKind.Single) =>
+                (inst.SrcUnsigned ? VectorOp.U2F : VectorOp.I2F, TypeKind.Single),
             _ => default
         };
     }
@@ -389,7 +391,8 @@ internal sealed class VectorTranslator
             }
         }
 
-        if (typeL.GetStorageType() != typeR.GetStorageType()) {
+        if (typeL.GetStorageType() != typeR.GetStorageType() ||
+            typeL.IsSmallInt() && typeL.IsSigned() != typeR.IsSigned()) {
             return default;
         }
 
@@ -457,6 +460,7 @@ internal sealed class VectorTranslator
             VectorOp.ExtractMSB => FindGen("ExtractMostSignificantBits", PrimType.UInt32, gm_Vec),
 
             VectorOp.I2F        => FindDef("ConvertToSingle",   vecType, vecType.Definition.GetSpec([PrimType.Int32])),
+            VectorOp.U2F        => FindDef("ConvertToSingle",   vecType, vecType.Definition.GetSpec([PrimType.UInt32])),
 
             VectorOp._Sum       => FindGen("Sum",               gm_Elem, gm_Vec),
 
