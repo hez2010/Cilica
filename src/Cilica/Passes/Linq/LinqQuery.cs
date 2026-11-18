@@ -15,6 +15,7 @@ internal abstract class LinqSink : LinqStageNode
 
     public virtual void EmitHead(IRBuilder builder, EstimatedSourceLen estimLen) { }
     public virtual void EmitTail(IRBuilder builder) { }
+    public virtual Value MapResult(IRBuilder builder, Value result) => result;
     public virtual bool HasDisposal => false;
     public virtual void EmitEnd(LoopBuilder loop) { }
     public abstract override void EmitBody(IRBuilder builder, Value currItem, BodyLoopData loopData);
@@ -54,12 +55,9 @@ internal abstract class LinqStageNode
 
     public virtual void Prepare(BodyLoopData loopData) { }
 
-    public void ValidateArguments(HashSet<CallInst> validated)
+    public static void ValidateArguments(CallInst call)
     {
-        if (SubjectCall is not { Method: MethodDefOrSpec method } call ||
-            method.DeclaringType.Namespace != "System.Linq" || method.DeclaringType.Name != "Enumerable" ||
-            !validated.Add(call)) return;
-
+        var method = (MethodDefOrSpec)call.Method;
         var builder = new IRBuilder(call, InsertionDir.Before);
         if (method.Name == "Range") {
             var exception = builder.Resolver.Import(typeof(ArgumentOutOfRangeException));
@@ -81,8 +79,6 @@ internal abstract class LinqStageNode
             if (i != 0 && !parameter.Type.Name.StartsWith("Func`")) continue;
             var arg = call.Args[i];
             if (arg is ConstString || ConstFolding.FoldCondition(arg) == true) continue;
-            // Enumerable operators return a non-null sequence after validating their inputs.
-            if (i == 0 && arg is CallInst { Method.DeclaringType.Namespace: "System.Linq", Method.DeclaringType.Name: "Enumerable" }) continue;
             builder.CreateCall(throwIfNull, arg, ConstString.Create(parameter.Name ?? (i == 0 ? "source" : "selector")));
         }
     }
@@ -125,21 +121,24 @@ internal abstract class LinqSourceNode : LinqStageNode
 
     public virtual void Emit(HashSet<CallInst> validated)
     {
-        for (LinqStageNode? node = this; node != null; node = node.Drain) node.ValidateArguments(validated);
+        for (LinqStageNode? node = this; node != null; node = node.Drain) {
+            if (node.SubjectCall is not { } call || node is LoopSink) continue;
+            // Enumerable stages return a non-null sequence after validating their inputs.
+            if (node is not LinqSink) call.ResultIsNonNull = true;
+            if (validated.Add(call)) ValidateArguments(call);
+        }
         var sink = GetSink();
 
         var loop = new LoopBuilder(sink.SubjectCall.Block, "LQ_");
-        var firstStage = Drain;
         var loopData = new BodyLoopData(loop);
-        for (LinqStageNode? node = firstStage; node != null; node = node.Drain) node.Prepare(loopData);
-
-        EmitHead(loop, out var length, ref firstStage, loopData);
-        sink.EmitHead(loop.PreHeader, new EstimatedSourceLen(length, firstStage));
+        EmitHead(loop, out var length, loopData);
+        for (LinqStageNode? node = Drain; node != null; node = node.Drain) node.Prepare(loopData);
+        sink.EmitHead(loop.PreHeader, new EstimatedSourceLen(length, Drain));
         loopData.HasDisposal |= sink.HasDisposal;
 
         loop.Build(
             emitCond: EmitMoveNext,
-            emitBody: body => firstStage.EmitBody(body, EmitCurrent(body), loopData),
+            emitBody: body => Drain.EmitBody(body, EmitCurrent(body), loopData),
             emitGuard: loopData.Limits.Count == 0 ? null : loopData.EmitGuard
         );
         sink.EmitTail(loop.Exit);
@@ -153,7 +152,8 @@ internal abstract class LinqSourceNode : LinqStageNode
                     loop.Exit.CreateStore(slot, result);
                     result = new IRBuilder(sink.SubjectCall, InsertionDir.Before).CreateLoad(slot);
                 }
-                sink.SubjectCall.ReplaceUses(result);
+                var continuation = new IRBuilder(sink.SubjectCall, InsertionDir.Before);
+                sink.SubjectCall.ReplaceUses(sink.MapResult(continuation, result));
             }
         }
         DeleteSubject();
@@ -161,31 +161,7 @@ internal abstract class LinqSourceNode : LinqStageNode
         EmitEnd(loop);
     }
 
-    protected static void IntegrateSkipTakeRanges(IRBuilder builder, ref LinqStageNode firstStage, out Value? offset, ref Value length)
-    {
-        offset = null;
-
-        if (firstStage is SkipStage { SubjectCall.Args: [_, var skipCount] }) {
-            // It's important to clamp skipCount both ways to avoid creating GC tracking holes.
-            //  offset = clamp(skipCount, 0, (int)count)
-            //  startPtr += offset
-            //  count -= offset
-            offset = builder.CreateMin(
-                builder.CreateMax(skipCount, ConstInt.CreateI(0)),
-                builder.CreateConvert(length, PrimType.Int32));
-            length = builder.CreateSub(length, offset);
-            firstStage = firstStage.Drain;
-        }
-        if (firstStage is TakeStage { SubjectCall.Args: [_, var takeCount] }) {
-            // A non-positive Take count produces an empty sequence.
-            length = builder.CreateMin(
-                builder.CreateConvert(length, PrimType.Int32),
-                builder.CreateMax(takeCount, ConstInt.CreateI(0)));
-            firstStage = firstStage.Drain;
-        }
-    }
-
-    protected abstract void EmitHead(LoopBuilder loop, out Value? length, ref LinqStageNode firstStage, BodyLoopData loopData);
+    protected abstract void EmitHead(LoopBuilder loop, out Value? length, BodyLoopData loopData);
     protected abstract Value EmitMoveNext(IRBuilder builder);
     protected abstract Value EmitCurrent(IRBuilder builder);
     protected virtual void EmitEnd(LoopBuilder loop) { }

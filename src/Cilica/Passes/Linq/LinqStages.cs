@@ -4,6 +4,8 @@ using Cilica.IR.Utils;
 
 internal class SelectStage : LinqStageNode
 {
+    public bool IsIndexed => SubjectCall.Method.ParamSig[1].Type.GenericParams.Count == 3;
+
     public SelectStage(CallInst call, LinqStageNode drain)
         : base(call, drain) { }
 
@@ -69,14 +71,12 @@ internal class CastStage : LinqStageNode
         Drain.EmitBody(builder, currItem, loopData);
     }
 }
-internal class SkipStage : LinqStageNode
+internal class SkipStage : PartitionStage
 {
     public SkipStage(CallInst call, LinqStageNode sink)
         : base(call, sink) { }
 
-    public override bool IsFiltering => true;
-
-    public override void EmitBody(IRBuilder builder, Value currItem, BodyLoopData loopData)
+    protected override void EmitStreamingBody(IRBuilder builder, Value currItem, BodyLoopData loopData)
     {
         // Behavior for `count <= 0` is nop (drain all source items)
         var count = SubjectCall.Args[1];
@@ -99,23 +99,22 @@ internal class SkipStage : LinqStageNode
         }).SetName("lq_skipRem");
     }
 }
-internal class TakeStage : LinqStageNode
+internal class TakeStage : PartitionStage
 {
     LocalSlot _remaining = null!;
     public LocalSlot Remaining => _remaining;
     public TakeStage(CallInst call, LinqStageNode sink)
         : base(call, sink) { }
 
-    public override bool IsFiltering => true;
-
     public override void Prepare(BodyLoopData loopData)
     {
+        if (IsSourceRange) return;
         _remaining = loopData.PreHeader.Method.CreateVar(PrimType.Int32, "lq_takeRemaining", hardExposed: true);
         loopData.PreHeader.CreateStore(_remaining, SubjectCall.Args[1]);
         loopData.Limits.Add(_remaining);
     }
 
-    public override void EmitBody(IRBuilder builder, Value currItem, BodyLoopData loopData)
+    protected override void EmitStreamingBody(IRBuilder builder, Value currItem, BodyLoopData loopData)
     {
         var remaining = builder.CreateLoad(_remaining);
         builder.CreateStore(_remaining, builder.CreateSub(remaining, ConstInt.CreateI(1)));

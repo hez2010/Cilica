@@ -22,10 +22,13 @@ public class ExpandLinq : IMethodPass
 
     public MethodPassResult Run(MethodTransformContext ctx)
     {
+        long revision = ctx.Method.Revision;
         var queries = new List<LinqSourceNode>();
 
         foreach (var inst in ctx.Method.Instructions()) {
-            if (inst is CallInst call && CreatePipe(call) is { } pipe) {
+            if (inst is not CallInst call) continue;
+            if (TryRemoveIdentityCast(call)) continue;
+            if (CreatePipe(call) is { } pipe) {
                 // Expansion can introduce cleanup regions, which CIL filters cannot contain.
                 if (ctx.GetAnalysis<ProtectedRegionAnalysis>().GetBlockRegion(call.Block).IsFilter) continue;
                 queries.Add(pipe);
@@ -37,7 +40,20 @@ public class ExpandLinq : IMethodPass
             query.Emit(validated);
             ctx.Logger.Trace($"Expanded LINQ query '{query}' into a loop.");
         }
-        return queries.Count > 0 ? MethodInvalidations.Loops : 0;
+        return queries.Count > 0 ? MethodInvalidations.Loops :
+            ctx.Method.Revision != revision ? MethodInvalidations.DataFlow : 0;
+    }
+
+    private bool TryRemoveIdentityCast(CallInst call)
+    {
+        if (call.Method.DeclaringType != t_Enumerable || call.Method.Name is not ("Cast" or "OfType")) return false;
+        var element = call.Method.GenericParams[0];
+        if (call.Method.Name == "OfType" && (!element.IsValueType || element.IsCorelibType(typeof(Nullable<>)))) return false;
+        var source = call.Args[0];
+        if (!source.ResultType.IsAssignableTo(call.ResultType)) return false;
+        LinqStageNode.ValidateArguments(call);
+        call.ReplaceWith(source);
+        return true;
     }
 
     private LinqSourceNode? CreatePipe(CallInst call)
@@ -46,7 +62,8 @@ public class ExpandLinq : IMethodPass
         if (sink == null) {
             return null;
         }
-        var source = CreateStage(call.GetOperandRef(0), sink);
+        var source = PartitionStage.Plan(CreateStage(call.GetOperandRef(0), sink), sink);
+        if (source == null) return null;
 
         // A helper may expose fixed storage after inlining. Keep the original
         // sink available until then instead of committing to an enumerator loop.
@@ -55,7 +72,6 @@ public class ExpandLinq : IMethodPass
         if (source is EnumeratorSource && !RuntimeLibrary.HasKnownSequenceDispatch(source.PhysicalSource.Operand)) {
             return null;
         }
-
         return IsProfitableToExpand(source, sink) ? source : null;
     }
 
@@ -132,8 +148,8 @@ public class ExpandLinq : IMethodPass
             var node = call.Method.Name switch {
                 "Select"        => new SelectStage(call, drain),
                 "Where"         => new WhereStage(call, drain),
-                "OfType"        => new OfTypeStage(call, drain),
-                "Cast"          => new CastStage(call, drain),
+                "OfType" when RuntimeLibrary.CanEnumerateTypeFilter(call) => new OfTypeStage(call, drain),
+                "Cast" when RuntimeLibrary.CanEnumerateTypeFilter(call)   => new CastStage(call, drain),
                 "SelectMany"    => new FlattenStage(call, drain),
                 "Skip"          => new SkipStage(call, drain),
                 "Take" when call.Method.ParamSig[1] == PrimType.Int32
@@ -154,4 +170,5 @@ public class ExpandLinq : IMethodPass
 
         return new EnumeratorSource(sourceRef, drain);
     }
+
 }

@@ -192,9 +192,8 @@ public class ConstFolding
                 r = c1.Equals(c2) ^ (op == CompareOp.Ne);
                 break;
             }
-            // (x != 0) -> x  where x: bool
-            // This is not valid according to ECMA, but we'll assume that all bools are 0/1. 
-            case ({ ResultType.Kind: TypeKind.Bool }, ConstInt { Value: 0 }, CompareOp.Ne): {
+            // (x != 0) -> x when x is known to be 0 or 1.
+            case (_, ConstInt { Value: 0 }, CompareOp.Ne) when IsBooleanBit(left): {
                 return left;
             }
             // x == x, x != x
@@ -209,6 +208,13 @@ public class ConstFolding
         }
         return r == null ? null : ConstInt.Create(PrimType.Bool, r.Value ? 1 : 0);
     }
+
+    internal static bool IsBooleanBit(Value value, int depth = 0) => value switch {
+        CompareInst { ResultType.Kind: TypeKind.Bool } or ConstInt { Value: 0 or 1 } => true,
+        BinaryInst { Op: BinaryOp.And or BinaryOp.Or or BinaryOp.Xor } binary when depth < 8 =>
+            IsBooleanBit(binary.Left, depth + 1) && IsBooleanBit(binary.Right, depth + 1),
+        _ => false
+    };
 
     public static Value? FoldSelect(Value cond, Value ifTrue, Value ifFalse)
     {

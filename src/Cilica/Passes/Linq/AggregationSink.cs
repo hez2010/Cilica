@@ -18,9 +18,9 @@ internal class AggregationSink : LinqSink
     {
         if (_hasData != null) {
             // goto hasData ? Exit : ThrowHelper
-            builder.Throw(typeof(InvalidOperationException), builder.CreateEq(_hasData, ConstInt.CreateI(0)));
+            builder.ThrowEmptySequence(noMatch: false, builder.CreateEq(_hasData, ConstInt.CreateI(0)));
         }
-        Result = MapResult(builder, _accumulator!);
+        Result = _accumulator;
     }
 
     public override void EmitBody(IRBuilder builder, Value currItem, BodyLoopData loopData)
@@ -67,7 +67,7 @@ internal class AggregationSink : LinqSink
         int lambdaIdx = SubjectCall.NumArgs >= 3 ? 2 : 1;
         return builder.CreateLambdaInvoke(SubjectCall, lambdaIdx, currAccum, currItem);
     }
-    protected virtual Value MapResult(IRBuilder builder, Value accum)
+    public override Value MapResult(IRBuilder builder, Value accum)
     {
         if (SubjectCall.NumArgs >= 4) {
             return builder.CreateLambdaInvoke(SubjectCall, 3, accum);
@@ -91,17 +91,13 @@ internal class CountSink : AggregationSink
     }
     protected override Value Accumulate(IRBuilder builder, Value currAccum, Value currItem, BasicBlock skipBlock)
     {
-        // Assume that bools are always normalized to 0/1.
+        // Count adds one for any nonzero predicate result, including an unnormalized bool.
         var inc = SubjectCall.Args.Length >= 2
-            ? builder.CreateLambdaInvoke(SubjectCall, 1, currItem)
+            ? builder.CreateNe(builder.CreateLambdaInvoke(SubjectCall, 1, currItem), ConstInt.CreateI(0))
             : ConstInt.CreateI(1);
 
         var op = _mayBeLongSource ? BinaryOp.AddOvf : BinaryOp.Add;
         return builder.CreateBin(op, currAccum, inc);
-    }
-    protected override Value MapResult(IRBuilder builder, Value accum)
-    {
-        return accum;
     }
 }
 

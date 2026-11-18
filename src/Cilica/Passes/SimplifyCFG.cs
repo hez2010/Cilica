@@ -197,7 +197,7 @@ public class SimplifyCFG : IMethodPass
                     (_, ConstInt c) => (c, valT),
                     _ => default
                 };
-                if (x?.Value is 0 or 1 && (y.ResultType == PrimType.Bool || y is ConstInt { Value: 0 or 1 })) {
+                if (x?.Value is 0 or 1 && ConstFolding.IsBooleanBit(y)) {
                     bool negCond = (x.Value == 0 && x == valT) || (x.Value != 0 && x == valF);
 
                     if (!negCond || cond.NumUses == 0) {

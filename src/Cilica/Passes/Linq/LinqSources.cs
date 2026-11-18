@@ -10,13 +10,13 @@ internal class MemorySource : LinqSourceNode
 
     Value? _currPtr, _endPtr;
 
-    protected override void EmitHead(LoopBuilder loop, out Value? length, ref LinqStageNode firstStage, BodyLoopData loopData)
+    protected override void EmitHead(LoopBuilder loop, out Value? length, BodyLoopData loopData)
     {
         var builder = loop.PreHeader;
         // T& startPtr = call MemoryMarshal.GetArrayDataReference<T>(T[]: source)  // or akin.
         (_currPtr, length) = LoopStrengthReduction.CreateGetDataPtrRange(builder, PhysicalSource.Operand);
 
-        IntegrateSkipTakeRanges(builder, ref firstStage, out var offset, ref length);
+        var offset = PartitionStage.ApplySourceRange(builder, Drain, ref length);
         if (offset != null) {
             _currPtr = builder.CreatePtrOffset(_currPtr, offset);
         }
@@ -41,7 +41,7 @@ internal class EnumeratorSource : LinqSourceNode
 
     EnumeratorLoop _enumeration = null!;
 
-    protected override void EmitHead(LoopBuilder loop, out Value? length, ref LinqStageNode firstStage, BodyLoopData loopData)
+    protected override void EmitHead(LoopBuilder loop, out Value? length, BodyLoopData loopData)
     {
         var sourceCall = (CallInst)PhysicalSource.Parent;
         var enumerableType = sourceCall.Method.ParamSig[PhysicalSource.OperIndex].Type; // IEnumerable<T> | IEnumerable
@@ -69,12 +69,14 @@ internal class IntRangeSource : LinqSourceNode
 
     Value? _index, _start, _count;
 
-    protected override void EmitHead(LoopBuilder loop, out Value? count, ref LinqStageNode firstStage, BodyLoopData loopData)
+    protected override void EmitHead(LoopBuilder loop, out Value? count, BodyLoopData loopData)
     {
+        var builder = loop.PreHeader;
         var start = SubjectCall.Args[0];
         count = SubjectCall.Args[1];
 
-        _start = start;
+        var offset = PartitionStage.ApplySourceRange(builder, Drain, ref count);
+        _start = offset == null ? start : builder.CreateAdd(start, offset);
         _count = count;
         _index = loop.CreateInductor().SetName("lq_rangeidx");
     }

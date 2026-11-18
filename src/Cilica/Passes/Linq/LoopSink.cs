@@ -75,7 +75,7 @@ internal class LoopSink : LinqSink
     }
     protected override void DeleteSubject()
     {
-        _nullCheck?.ReplaceWith(ConstInt.CreateI(0));
+        if (_nullCheck != null) _nullCheck.ReplaceWith(ConstInt.CreateI(_nullCheck.Op == CompareOp.Ne ? 1 : 0));
         _dispose?.Remove();
         base.DeleteSubject();
     }
@@ -100,7 +100,7 @@ internal class LoopSink : LinqSink
                 if (!calls.TryAdd(call.Method.Name, call)) {
                     return false;
                 }
-            } else if (user is CompareInst { Right: ConstNull } cmp && _nullCheck == null) {
+            } else if (user is CompareInst { Op: CompareOp.Eq or CompareOp.Ne, Right: ConstNull } cmp && _nullCheck == null) {
                 _nullCheck = cmp;
             } else {
                 return false;
@@ -133,7 +133,8 @@ internal class LoopSink : LinqSink
         }
         bool matched = _regionEntry != null &&
                // Match `Header: goto enumer.MoveNext() ? Body : Latch`
-               _header.First == _moveNext && _header.Last is BranchInst br && br.Cond == _moveNext &&
+               _header.First == _moveNext && _moveNext.Next == _header.Last && _moveNext.NumUses == 1 &&
+               _header.Last is BranchInst br && br.Cond == _moveNext &&
                // Match `Body: T curr = enumer.get_Current()`
                (_body = br.Then).First == _getCurrent &&
                // Match `Exit: leave RegionSucc`

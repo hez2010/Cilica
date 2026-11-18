@@ -14,6 +14,21 @@ public sealed class RuntimeLibrary(ModuleResolver resolver)
     internal static bool IsSpanAccessor(MethodDesc method)
         => method.Name is "get_Length" or "get_Item" or "GetPinnableReference" && IsSpanType(method.DeclaringType);
 
+    internal static bool IsEnumerableMethod(MethodDesc method)
+        => method.DeclaringType is TypeDefOrSpec { Namespace: "System.Linq", Name: "Enumerable" } type &&
+           type.Module == type.Module.Resolver.Resolve("System.Linq");
+
+    // Cast and OfType can forward a typed sequence. A fused type filter must see the same elements through either enumerator.
+    // For example, a uint[] viewed as IEnumerable<int> yields ints, while its non-generic enumerator boxes uints.
+    internal static bool CanEnumerateTypeFilter(CallInst call)
+    {
+        var source = call.Args[0];
+        if (source.ResultType.Kind == TypeKind.String || source.ResultType is ArrayType { ElemType: { IsValueType: false } and not GenericParamType }) return true;
+        if (source is CallInst { Method.Name: "Range" or "Where" or "Select" or "SelectMany" } producer && IsEnumerableMethod(producer.Method)) return true;
+        return source is CilIntrinsic.NewArray { ElemType.IsValueType: true } &&
+            call.Method.GenericParams[0] is { IsValueType: false } and not GenericParamType;
+    }
+
     // Sequence optimizations consume these calls directly.
     internal bool IsOptimizationIntrinsic(MethodDef method)
     {
@@ -21,8 +36,7 @@ public sealed class RuntimeLibrary(ModuleResolver resolver)
         if (type.IsCorelibType(typeof(List<>))) {
             return method.Name is "Add" or "ToArray" or "get_Count" or "get_Item";
         }
-        if (type.Namespace == "System.Linq" && type.Name == "Enumerable" &&
-            method.Module == Resolver.Resolve("System.Linq")) {
+        if (IsEnumerableMethod(method)) {
             return method.Name switch {
                 "Range" or "Where" or "Select" or "SelectMany" or "Skip" or "Cast" or "OfType" or
                 "ToList" or "ToArray" or "ToHashSet" or "Aggregate" or "First" or "FirstOrDefault" or "All" => true,
@@ -85,10 +99,9 @@ public sealed class RuntimeLibrary(ModuleResolver resolver)
         }
 
         if (source is CallInst { Method: MethodDefOrSpec method } call) {
-            if (method.DeclaringType.Namespace == "System.Linq" && method.DeclaringType.Name == "Enumerable" &&
-                method.Module == method.Module.Resolver.Resolve("System.Linq")) {
-                return method.Name == "AsEnumerable" ? HasKnownSequenceDispatch(call.Args[0])
-                    : method.Name is "Range" or "Where" or "Select" or "SelectMany" or "Skip" or "Take" or "Cast" or "OfType";
+            if (IsEnumerableMethod(method)) {
+                return method.Name is "AsEnumerable" or "Cast" or "OfType" ? HasKnownSequenceDispatch(call.Args[0])
+                    : method.Name is "Range" or "Where" or "Select" or "SelectMany" or "Skip" or "Take";
             }
 
             if (method.Definition.HasCustomAttrib("System.Runtime.CompilerServices", "IteratorStateMachineAttribute")) {

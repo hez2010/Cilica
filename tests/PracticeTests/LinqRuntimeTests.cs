@@ -6,6 +6,136 @@ using System.Runtime.CompilerServices;
 [Optimize]
 public class LinqRuntimeTests
 {
+    [Fact]
+    public void ProjectionSkippingAndDelegateDefaultsMatchEnumerable()
+    {
+        int calls = 0;
+        Assert.Equal(3, new[] { 1, 2, 3 }.Select(x => { calls++; return x; }).Skip(2).First());
+        Assert.Equal(1, calls);
+        Func<object, bool> item = _ => true, fallback = _ => false;
+        Assert.Same(item, new[] { item }.FirstOrDefault(defaultValue: fallback));
+        Assert.Same(fallback, Array.Empty<Func<object, bool>>().FirstOrDefault(defaultValue: fallback));
+    }
+
+    [Fact, CheckCodeGenAfterRun]
+    public void ArrayPartitionsProjectOnlyTheRequestedItems()
+    {
+        int[] values = [1, 2, 3, 4, 5, 6];
+        var calls = new List<int>();
+        var result = values.Select(x => { calls.Add(x); return x * 10; }).Skip(1).Take(4).Skip(2).ToArray();
+        Assert.Equal(new[] { 4, 5 }, calls);
+        Assert.Equal(new[] { 40, 50 }, result);
+        // CHECK-NOT: Enumerable::Skip
+    }
+
+    [Fact]
+    public void SkippingPastATakeLimitCanBypassTheFilter()
+    {
+        int[] values = [1, 2, 3];
+        int calls = 0;
+        Assert.Empty(values.Where(x => { calls++; return true; }).Take(2).Skip(3).ToArray());
+        Assert.Equal(0, calls);
+    }
+
+    [Fact, CheckCodeGenAfterRun]
+    public void TypeFiltersFuseOverProjectedValues()
+    {
+        int[] values = [0, 1, 2];
+        object?[] expected = [1, 2];
+        Assert.Equal(expected, values.Select(x => x == 0 ? null : (object)x).OfType<object>().ToArray());
+        // CHECK-NOT: Enumerable::OfType
+    }
+
+    [Fact, CheckCodeGenAfterRun]
+    public void HashSetMaterializationFusesWithFilteringAndKeepsItsComparer()
+    {
+        string[] words = ["red", "RED", "", "blue"];
+        var comparer = StringComparer.OrdinalIgnoreCase;
+        var set = words.Where(word => word.Length != 0).ToHashSet(comparer);
+        Assert.Same(comparer, set.Comparer);
+        Assert.Equal(2, set.Count);
+        Assert.True(set.SetEquals(["BLUE", "red"]));
+        // CHECK: newobj HashSet`1[string]::.ctor
+        // CHECK-NOT: Enumerable::ToHashSet
+    }
+
+    [Fact]
+    public void TerminalOperatorsPreserveDispatchAndValidation()
+    {
+        System.Collections.IEnumerable input = new uint[] { uint.MaxValue };
+        Assert.Equal(-1, input.Cast<int>().First());
+        Assert.Equal(-1, input.OfType<int>().FirstOrDefault());
+        int[][] empty = [];
+        Assert.Equal("source", Assert.Throws<ArgumentNullException>(() => empty.SingleOrDefault()!.Count(x => x > 0)).ParamName);
+        var duplicates = Enumerable.Repeat(1, 100).ToArray();
+        Assert.Equal(1, Assert.Single(duplicates.ToHashSet()));
+    }
+
+    [Fact]
+    public void ResultSelectorObservesEnumeratorDisposal()
+    {
+        var sequence = new DisposableSequence();
+        Assert.Equal(107, sequence.Aggregate(0, (sum, value) => sum + value,
+            sum => sum + 100 * sequence.Disposals));
+    }
+
+    sealed class DisposableSequence : IEnumerable<int>, IEnumerator<int>
+    {
+        public int Disposals;
+        bool _started;
+        public IEnumerator<int> GetEnumerator() => this;
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+        public int Current => 7;
+        object System.Collections.IEnumerator.Current => Current;
+        public bool MoveNext() { bool first = !_started; _started = true; return first; }
+        public void Dispose() => Disposals++;
+        public void Reset() => throw new NotSupportedException();
+    }
+
+    [Fact]
+    public void LoopExpansionRetainsHeaderCallbacksAndFinallyConditions()
+    {
+        int ticks = 0;
+        int[] data = [1, 2];
+        var iterator = data.Where(x => true).GetEnumerator();
+        try {
+            Tick(ref ticks);
+            while (true) {
+                bool more = iterator.MoveNext();
+                Tick(ref ticks);
+                if (!more) break;
+                GC.KeepAlive(iterator.Current);
+            }
+        } finally {
+            if (iterator != null) iterator.Dispose();
+        }
+        Assert.Equal(4, ticks);
+        var other = data.Where(x => true).GetEnumerator();
+        try {
+            while (other.MoveNext()) GC.KeepAlive(other.Current);
+        } finally {
+            if (other == null) Tick(ref ticks);
+            else other.Dispose();
+        }
+        Assert.Equal(4, ticks);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static void Tick(ref int count) => count++;
+
+    [Fact]
+    public void PredicateCountCountsEveryNonzeroBooleanOnce()
+    {
+        Assert.Equal(3, new[] { 1, 2, 3 }.Count(Nonzero));
+        Assert.True(new[] { 1, 2, 3 }.All(Nonzero));
+
+        static bool Nonzero(int value)
+        {
+            byte bits = 2;
+            return Unsafe.As<byte, bool>(ref bits);
+        }
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(3)]

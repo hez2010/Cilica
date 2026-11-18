@@ -6,6 +6,8 @@ using Cilica.IR.Utils;
 //First{OrDefault}(pred?)
 internal class FindSink : LinqSink
 {
+    public bool HasPredicate => ((MethodDefOrSpec)SubjectCall.Method).Definition.ParamSig is [_, { Type.Name: "Func`2" }, ..];
+
     public FindSink(CallInst call)
         : base(call) { }
 
@@ -16,7 +18,8 @@ internal class FindSink : LinqSink
 
         // First(source, predicate)
         // FirstOrDefault(source, predicate?, defaultValue?)
-        if (SubjectCall.Method.ParamSig is [_, { Type.Name: "Func`2" }, ..]) {
+        var signature = ((MethodDefOrSpec)SubjectCall.Method).Definition.ParamSig;
+        if (HasPredicate) {
             // goto pred(currItem) ? NextBody : Latch
             var cond = builder.CreateLambdaInvoke(SubjectCall, 1, currItem);
             builder.ForkIf(cond, loopData.SkipBlock, negate: true);
@@ -25,12 +28,12 @@ internal class FindSink : LinqSink
         var type = SubjectCall.ResultType;
         var resultSlot = Method.CreateVar(type, "lq_found", hardExposed: true);
         if (op.EndsWith("OrDefault")) {
-            var defaultValue = SubjectCall.Method.ParamSig[^1] == type
+            var defaultValue = signature[^1].Type is GenericParamType
                 ? SubjectCall.Args[^1]
                 : loopData.PreHeader.CreateDefaultOf(type);
             loopData.PreHeader.CreateStore(resultSlot, defaultValue);
         } else {
-            exit.Throw(typeof(InvalidOperationException));
+            exit.ThrowEmptySequence(noMatch: HasPredicate);
             exit.SetPosition(exit.Method.CreateBlock(insertAfter: exit.Block));
         }
         builder.CreateStore(resultSlot, currItem);
@@ -59,6 +62,6 @@ internal class QuantifySink : LinqSink
         matched.CreateStore(resultSlot, ConstInt.CreateI(1 - normRes));
         matched.SetBranch(loopData.GetExitTarget(exit.Block));
         var cond = builder.CreateLambdaInvoke(SubjectCall, 1, currItem);
-        builder.ForkIf(builder.CreateNe(cond, ConstInt.CreateI(normRes)), found);
+        builder.ForkIf(cond, found, negate: normRes != 0);
     }
 }

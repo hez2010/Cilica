@@ -26,16 +26,12 @@ internal static class IRBuilderExt
         return ib.CreateCallVirt(invoker, lambda, currItem);
     }
 
-    public static void Throw(this IRBuilder ib, Type exceptionType, Value? cond = null)
+    public static void ThrowEmptySequence(this IRBuilder ib, bool noMatch, Value? cond = null)
     {
-        var modResolver = ib.Method.Definition.Module.Resolver;
-        var exceptCtor = modResolver.Import(exceptionType)
-            .FindMethod(".ctor", new MethodSig(PrimType.Void, [], isInstance: true));
-
+        var helpers = ib.Resolver.Resolve("System.Linq").FindType("System.Linq", "ThrowHelper", throwIfNotFound: true);
         var throwHelper = ib.Method.CreateBlock().SetName("LQ_ThrowHelper");
-        var exceptObj = new NewObjInst(exceptCtor, []);
-        throwHelper.InsertLast(exceptObj);
-        throwHelper.InsertLast(new ThrowInst(exceptObj));
+        new IRBuilder(throwHelper).CreateCall(helpers.FindMethod(noMatch ? "ThrowNoMatchException" : "ThrowNoElementsException"));
+        throwHelper.InsertLast(new ThrowInst(ConstNull.Create()));
 
         if (cond == null) {
             ib.SetBranch(throwHelper);
