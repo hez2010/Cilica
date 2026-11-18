@@ -12,33 +12,28 @@ public class PresizeLists : IMethodPass
         var domTree = ctx.GetAnalysis<DominatorTree>();
         var regions = ctx.GetAnalysis<ProtectedRegionAnalysis>();
 
-        var candidateLists = new Dictionary<TrackedValue, (bool HasConditionalAdd, int AddCallCount)>();
+        var candidateLists = new Dictionary<NewObjInst, (bool HasConditionalAdd, int AddCallCount)>();
+        var useDominators = new Dictionary<NewObjInst, BasicBlock?>();
         int numChanges = 0;
 
         foreach (var loop in loopAnalysis.GetShapedLoops(innermostOnly: true)) {
             // Must be able to calculate loop trip count before entering it
             if (!loop.HasKnownTripCount(domTree, loop.PreHeader.Last)) continue;
+            bool? bodyIsAcyclic = null;
 
             // Find Add() calls inside loop
             foreach (var block in loop.Blocks) {
                 foreach (var inst in block) {
                     if (!(inst is CallInst call && IsListAdd(call.Method))) continue;
 
-                    // List must have been defined outside loop
-                    if (call.Args is not [TrackedValue list, ..] || !loop.IsInvariant(list)) continue;
-
-                    if (list is not NewObjInst { NumArgs: 0 } || !IsConfined(list)) {
-                        continue;
-                    }
+                    // The list must be allocated outside the loop it is being presized for.
+                    if (call.Args is not [NewObjInst { NumArgs: 0 } list, ..] || !loop.IsInvariant(list)) continue;
 
                     ref var info = ref candidateLists.GetOrAddRef(list);
 
-                    // The call is executed unconditionally on every loop iteration iff
-                    // the block it is defined in dominates the loop latch.
-                    // We could probably speculate a reasonable initial capacity given
-                    // PGO data, but that's thinking way ahead :')
-                    if (inst.Block != loop.Header && domTree.Dominates(inst.Block, loop.Latch) &&
-                        !ControlFlowFacts.CanRepeatWithout(inst.Block, loop.Header)) {
+                    // Each completed iteration executes a dominating Add at least once.
+                    // Estimating conditional appends would require a frequency for that path.
+                    if (block != loop.Header && domTree.Dominates(block, loop.Latch)) {
                         info.AddCallCount++;
                     } else {
                         info.HasConditionalAdd = true;
@@ -47,24 +42,28 @@ public class PresizeLists : IMethodPass
             }
 
             // Pre-size lists
-            foreach (var (list, info) in candidateLists) {
-                if (info.AddCallCount == 0) continue; // nothing we can do
-
-                var listAlloc = (NewObjInst)list;
-
-                if (!CanSinkAlloc(listAlloc, loop.PreHeader.Last, domTree, regions)) {
+            foreach (var (listAlloc, info) in candidateLists) {
+                if (info.AddCallCount == 0 || !IsListMethod(listAlloc.Constructor)) continue;
+                if (!useDominators.TryGetValue(listAlloc, out var uses)) {
+                    uses = FindConfinedUseDominator(listAlloc, domTree);
+                    useDominators.Add(listAlloc, uses);
+                }
+                // Every use must follow the normal edge from the preheader into the loop.
+                if (uses == null || !domTree.Dominates(loop.Header, uses) ||
+                    !CanSinkAlloc(listAlloc, loop.PreHeader, domTree, loopAnalysis, regions)) {
                     continue;
                 }
 
                 var builder = new IRBuilder(loop.PreHeader);
                 var (capacity, exact) = GetCapacity(loop, info.AddCallCount, builder);
-                var ctorWithCap = list.ResultType.FindMethod(".ctor", new MethodSig(PrimType.Void, [PrimType.Int32]));
+                var ctorWithCap = listAlloc.ResultType.FindMethod(".ctor", new MethodSig(PrimType.Void, [PrimType.Int32]));
                 var newList = builder.CreateNewObj(ctorWithCap, capacity);
                 ctx.Logger.Trace($"Presized '{listAlloc}' in '{listAlloc.Block}' to capacity '{capacity}' for loop '{loop.Header}'.");
                 listAlloc.ReplaceWith(newList);
 
-                if (!info.HasConditionalAdd && exact) {
-                    TryReplaceArrayBuilder(loop, builder, newList, domTree, ctx.Logger);
+                // Direct array writes require exactly one append per counted call on every iteration.
+                if (!info.HasConditionalAdd && exact && (bodyIsAcyclic ??= loopAnalysis.BodyIsAcyclic(loop.Loop))) {
+                    TryReplaceArrayBuilder(loop, builder, newList, domTree, loopAnalysis, ctx.Logger);
                 }
 
                 numChanges++;
@@ -86,60 +85,57 @@ public class PresizeLists : IMethodPass
         return (builder.CreateSelect(builder.CreateUle(trips, ConstInt.CreateI(limit)), capacity, ConstInt.CreateI(0)), false);
     }
 
-    private static bool IsConfined(TrackedValue list)
-        => list.Uses().All(use => use.OperIndex == 0 && use.Parent is CallInst call && IsListMethod(call.Method) &&
-            call.Method.Name is "Add" or "ToArray" or "get_Count" or "get_Item");
+    private static BasicBlock? FindConfinedUseDominator(NewObjInst list, DominatorTree dominators)
+    {
+        BasicBlock? common = null;
+        foreach (var (user, operand) in list.Uses()) {
+            if (operand != 0 || user is not CallInst call || !IsListMethod(call.Method) ||
+                call.Method.Name is not ("Add" or "ToArray" or "get_Count" or "get_Item")) return null;
+            common ??= user.Block;
+            while (!dominators.Dominates(common, user.Block)) common = dominators.IDom(common);
+        }
+        return common;
+    }
 
     // A confined list construction can write directly to its result array.
     // Observable lists retain Add's versioning and incremental mutation semantics.
-    private static bool TryReplaceArrayBuilder(ShapedLoopInfo loop, IRBuilder builder, TrackedValue list, DominatorTree domTree, ICompilationLogger logger)
+    //   PreHeader: list = newobj List`1[T]::.ctor(int: capacity)
+    //   Body:      call List`1[T]::Add(this: list, T: value)
+    //   AfterLoop: result = call List`1[T]::ToArray(this: list)
+    // Every use inside the loop must be an Add. The single ToArray must execute at most once per allocation.
+    private static bool TryReplaceArrayBuilder(ShapedLoopInfo loop, IRBuilder builder, NewObjInst list, DominatorTree domTree,
+        LoopAnalysis loops, ICompilationLogger logger)
     {
         var addCalls = new List<CallInst>();
-        var toArrayCall = default(CallInst);
-        int numToArrayCalls = 0, numOtherUses = 0;
-
-        foreach (var user in list.Users()) {
-            if (loop.Contains(user.Block)) {
-                // Loop uses must be only from Add() calls
-                if (user is CallInst call && IsListMethod(call.Method) && call.Method.Name == "Add") {
-                    addCalls.Add(call);
-                } else {
-                    return false;
-                }
+        CallInst? toArrayCall = null;
+        foreach (CallInst call in list.Users()) {
+            if (loop.Contains(call.Block) && call.Method.Name == "Add") {
+                addCalls.Add(call);
+            } else if (!loop.Contains(call.Block) && call.Method.Name == "ToArray" && toArrayCall == null) {
+                toArrayCall = call;
             } else {
-                // Uses from elsewhere can do whatever, we just need to track ToArray() calls
-                if (user is CallInst call && IsListMethod(call.Method) && call.Method.Name == "ToArray") {
-                    toArrayCall = call;
-                    numToArrayCalls++;
-                } else {
-                    numOtherUses++;
-                }
+                return false;
             }
         }
 
-        if (toArrayCall == null || numToArrayCalls != 1 || numOtherUses != 0 ||
-            !domTree.Dominates(loop.Exit, toArrayCall.Block) ||
-            ControlFlowFacts.CanRepeatWithout(toArrayCall.Block, builder.Block) ||
-            list is not NewObjInst { Args: [{ ResultType.Kind: TypeKind.Int32 }] } listAlloc) return false;
+        if (toArrayCall == null || !domTree.Dominates(loop.Exit, toArrayCall.Block) ||
+            loops.MayRepeatWithout(toArrayCall.Block, builder.Block)) return false;
 
         var elemType = list.ResultType.GenericParams[0];
-        var array = builder.CreateNewArray(elemType, listAlloc.Args[0]).SetName("arrbuilder_items");
+        var array = builder.CreateNewArray(elemType, list.Args[0]).SetName("arrbuilder_items");
         logger.Trace($"Replaced '{toArrayCall}' in '{toArrayCall.Block}' with direct array construction '{array}' for loop '{loop.Header}'.");
         toArrayCall.ReplaceWith(array);
-        listAlloc.Remove();
-        Debug.Assert(listAlloc.NumUses == addCalls.Count);
+        list.Remove();
 
         // Canonical counting loops use their induction variable as the destination index.
         if (addCalls.Count == 1 && loop is CountingLoopInfo { IsCanonical: true } forLoop) {
             var basePtr = LoopStrengthReduction.CreateGetDataPtrRange(builder, array, getCount: false).BasePtr;
 
-            foreach (var call in addCalls) {
-                builder.SetPosition(call, InsertionDir.After);
-
-                var ptr = builder.CreatePtrOffset(basePtr, forLoop.Counter);
-                builder.CreateStore(ptr, call.Args[1]);
-                call.Remove();
-            }
+            var call = addCalls[0];
+            builder.SetPosition(call, InsertionDir.After);
+            var ptr = builder.CreatePtrOffset(basePtr, forLoop.Counter);
+            builder.CreateStore(ptr, call.Args[1]);
+            call.Remove();
         } else {
             var idxVar = builder.Method.CreateVar(PrimType.Int32, "arrbuilder_idx");
             builder.CreateStore(idxVar, ConstInt.CreateI(0));
@@ -155,19 +151,15 @@ public class PresizeLists : IMethodPass
         return true;
     }
 
-    // Checks if `alloc` can be moved to after `inst`
-    private static bool CanSinkAlloc(NewObjInst alloc, Instruction inst, DominatorTree domTree, ProtectedRegionAnalysis regions)
+    // Sinking the allocation into the preheader must preserve its lifetime across visits to the loop.
+    private static bool CanSinkAlloc(NewObjInst alloc, BasicBlock preheader, DominatorTree domTree,
+        LoopAnalysis loops, ProtectedRegionAnalysis regions)
     {
-        if (ControlFlowFacts.CanRepeatWithout(inst.Block, alloc.Block)) return false;
+        if (!domTree.Dominates(alloc.Block, preheader) || loops.MayRepeatWithout(preheader, alloc.Block)) return false;
         var sourceRegion = regions.GetBlockRegion(alloc.Block);
-        for (var region = regions.GetBlockRegion(inst.Block); region != sourceRegion; region = region.Parent) {
+        for (var region = regions.GetBlockRegion(preheader); region != sourceRegion; region = region.Parent) {
             if (region == null || region.GetHandlerGuard() != null ||
                 region.StartBlock.Guards().Any(g => g.Kind != GuardKind.Finally)) return false;
-        }
-        foreach (var user in alloc.Users()) {
-            if (!domTree.Dominates(inst, user)) {
-                return false;
-            }
         }
         return true;
     }

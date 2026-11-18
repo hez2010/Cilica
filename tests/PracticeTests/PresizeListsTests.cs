@@ -23,6 +23,22 @@ public class PresizeListsTests
     }
 
     [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void DerivedListKeepsItsConstructor(int count)
+    {
+        var list = new SeededList<int>();
+        for (int i = 0; i < count; i++) list.Add(i + 1);
+        Assert.Equal(Enumerable.Range(0, count + 1), list.ToArray());
+        // CHECK: SeededList`1[int]::.ctor()
+    }
+
+    sealed class SeededList<T> : List<T>
+    {
+        public SeededList() => Add(default!);
+    }
+
+    [Theory]
     [InlineData((ushort)0)]
     [InlineData((ushort)35)]
     public void SmallUnsignedCountsBuildArraysDirectly(ushort count)
@@ -74,6 +90,19 @@ public class PresizeListsTests
         }
         // CHECK: ToArray(
     }
+
+    [Fact]
+    public void EnumeratorFactoriesCanReturnAPrefixOfAnArray()
+    {
+        var list = new List<int>();
+        var iterator = GetEnumerator(new[] { 7, 8, 9 });
+        while (iterator.MoveNext()) list.Add(iterator.Current);
+        Assert.Equal(new[] { 7 }, list.ToArray());
+        // CHECK: ToArray(
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static IEnumerator<int> GetEnumerator(int[] values) => values.Take(1).GetEnumerator();
 
     [Fact]
     public void EnumerationDoesNotReadUserCountGetters()

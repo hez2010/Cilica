@@ -186,38 +186,31 @@ public class EnumeratingLoopInfo : ShapedLoopInfo
 
     public override bool HasKnownTripCount(DominatorTree? domTree, Instruction? position)
     {
-        if (domTree == null || position == null) return false;
-        if (Enumerator is not CallInst { Method.Name: "GetEnumerator", Args: [var source] }) return false;
-
-        if (!RuntimeLibrary.HasKnownCollectionCount(source)) {
-            return false;
-        }
-
-        if (source is Instruction sourceI && !domTree.Dominates(sourceI, position)) return false;
-
-        return true;
+        return domTree != null && position != null && CountedSource() is { } source &&
+               (source is not Instruction instruction || domTree.Dominates(instruction, position));
     }
 
     public override Value? GetTripCount(IRBuilder? builder)
     {
-        if (builder == null) return null;
-        if (Enumerator is not CallInst { Method.Name: "GetEnumerator", Args: [var source] }) return null;
-
-        return RuntimeLibrary.HasKnownCollectionCount(source) ? RuntimeLibrary.EmitCollectionCount(builder, source) : null;
+        return builder != null && CountedSource() is { } source ? RuntimeLibrary.EmitCollectionCount(builder, source) : null;
     }
+
+    private Value? CountedSource()
+        => Enumerator is CallInst { IsStatic: false, Method.Name: "GetEnumerator", Args: [var source] } acquisition &&
+           acquisition.Method.DeclaringType.IsCorelibType() && RuntimeLibrary.HasKnownCollectionCount(source) ? source : null;
 
     protected override bool Parse()
     {
         if (!base.Parse()) return false;
 
-        if (ExitCondition is not { Method.Name: "MoveNext", NumArgs: 1, ResultType.Kind: TypeKind.Bool }) return false;
+        if (ExitCondition is not { IsStatic: false, Method.Name: "MoveNext", NumArgs: 1, ResultType.Kind: TypeKind.Bool }) return false;
 
         CurrentItem = (((BranchInst)Header.Last).Then.First as CallInst)!;
-        if (CurrentItem is not { Method.Name: "get_Current", NumArgs: 1, HasResult: true }) return false;
+        if (CurrentItem is not { IsStatic: false, Method.Name: "get_Current", NumArgs: 1, HasResult: true }) return false;
         if (CurrentItem.Args[0] != Enumerator) return false;
 
         return Enumerator is TrackedValue enumerator && enumerator.Uses().All(use => use.OperIndex == 0 &&
             (use.Parent == ExitCondition || use.Parent == CurrentItem ||
-             !Contains(use.Parent.Block) && use.Parent is CallInst { Method.Name: "Dispose", NumArgs: 1 } or CompareInst));
+             !Contains(use.Parent.Block) && use.Parent is CallInst { IsStatic: false, Method.Name: "Dispose", NumArgs: 1 } or CompareInst));
     }
 }

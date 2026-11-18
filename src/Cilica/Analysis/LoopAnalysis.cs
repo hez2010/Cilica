@@ -7,6 +7,9 @@ public class LoopAnalysis : IMethodAnalysis
 
     /// <summary> All natural loops, in header order. </summary>
     public List<LoopInfo> Loops { get; } = new();
+    // Reducible graphs need only their natural loop headers.
+    readonly HashSet<BasicBlock>? _irreducibleRetreatTargets;
+    Dictionary<BasicBlock, LoopInfo>? _innermost;
 
     public IEnumerable<LoopInfo> RootLoops => Loops.Where(loop => loop.Parent == null);
 
@@ -14,11 +17,11 @@ public class LoopAnalysis : IMethodAnalysis
     {
         // Based on https://pages.cs.wisc.edu/~fischer/cs701.f14/finding.loops.html
         var worklist = new ArrayStack<BasicBlock>();
-        var reachable = new HashSet<BasicBlock>();
-        method.TraverseDepthFirst(preVisit: block => reachable.Add(block));
+        var finish = new Dictionary<BasicBlock, int>();
+        method.TraverseDepthFirst(postVisit: block => finish.Add(block, finish.Count));
 
         foreach (var header in method) {
-            if (!reachable.Contains(header)) {
+            if (!finish.TryGetValue(header, out int headerOrder)) {
                 continue;
             }
 
@@ -26,7 +29,9 @@ public class LoopAnalysis : IMethodAnalysis
 
             foreach (var latch in header.Preds) {
                 // Check if `latch -> header` is actually a back-edge
-                if (!reachable.Contains(latch) || !domTree.Dominates(header, latch)) {
+                if (!finish.TryGetValue(latch, out int latchOrder) || latchOrder > headerOrder) continue;
+                if (!domTree.Dominates(header, latch)) {
+                    (_irreducibleRetreatTargets ??= new()).Add(header);
                     continue;
                 }
 
@@ -45,7 +50,7 @@ public class LoopAnalysis : IMethodAnalysis
                     if (!body.Add(block)) continue;
 
                     foreach (var pred in block.Preds) {
-                        if (reachable.Contains(pred)) {
+                        if (finish.ContainsKey(pred)) {
                             worklist.Push(pred);
                         }
                     }
@@ -54,6 +59,7 @@ public class LoopAnalysis : IMethodAnalysis
         }
 
         foreach (var loop in Loops) {
+            _irreducibleRetreatTargets?.Add(loop.Header);
             loop.Parent = Loops.Where(parent => parent != loop && parent.NumBlocks > loop.NumBlocks &&
                 loop.Blocks.GetEnumerator().AsEnumerable().All(parent.Contains)).MinBy(parent => parent.NumBlocks);
 
@@ -62,6 +68,32 @@ public class LoopAnalysis : IMethodAnalysis
                 parent._firstChild = loop;
             }
         }
+    }
+
+    // Every cycle has a DFS retreating edge. In a reducible graph each such
+    // edge is a natural backedge to the header of its own loop.
+    internal bool BodyIsAcyclic(LoopInfo loop)
+        => !loop.HasChildren && (_irreducibleRetreatTargets == null ||
+            !loop.Blocks.GetEnumerator().Any(b => b != loop.Header && _irreducibleRetreatTargets.Contains(b)));
+
+    /// <summary> Whether a dominated block can execute twice between visits to its dominator. </summary>
+    internal bool MayRepeatWithout(BasicBlock block, BasicBlock dominator)
+    {
+        if (block == dominator) return false;
+        if (_irreducibleRetreatTargets != null) return ControlFlowFacts.CanRepeatWithout(block, dominator);
+        if (_innermost == null) {
+            _innermost = new();
+            foreach (var loop in Loops) {
+                foreach (var member in loop.Blocks) {
+                    if (!_innermost.TryGetValue(member, out var inner) || loop.NumBlocks < inner.NumBlocks) {
+                        _innermost[member] = loop;
+                    }
+                }
+            }
+        }
+        // Re-entering a block in a reducible CFG revisits its innermost header.
+        // A dominator inside that loop must execute again on the way to the block.
+        return _innermost.TryGetValue(block, out var containing) && !containing.Contains(dominator);
     }
 
     public IEnumerable<ShapedLoopInfo> GetShapedLoops(bool innermostOnly = false)
