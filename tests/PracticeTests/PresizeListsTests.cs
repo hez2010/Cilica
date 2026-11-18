@@ -72,6 +72,7 @@ public class PresizeListsTests
             Assert.Equal(7, snapshot[0]);
             snapshot[0] = 0;
         }
+        // CHECK: ToArray(
     }
 
     [Fact]
