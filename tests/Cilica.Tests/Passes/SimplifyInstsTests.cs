@@ -43,6 +43,16 @@ public class SimplifyInstsTests(ModuleResolverFixture fixture) : PassTestBase(fi
     }
 
     [Fact]
+    public void NativeMultiplicationKeepsTheNativeIntermediateWidth()
+    {
+        var body = Utils.CreateTestMethod(_modResolver, PrimType.IntPtr, PrimType.IntPtr);
+        var builder = new IRBuilder(body.CreateBlock());
+        builder.CreateReturn(builder.CreateMul(builder.CreateMul(body.Args[0], ConstInt.CreateI(int.MaxValue)), ConstInt.CreateI(2)));
+        Run(body, new SimplifyInsts(_modResolver));
+        Assert.Equal(unchecked((nint)3 * int.MaxValue * 2), Utils.Compile<Func<nint, nint>>(body)(3));
+    }
+
+    [Fact]
     public void Test_SimplifyInsts() => CheckIR("SimplifyInsts.ethil", new SimplifyInsts(_modResolver));
 
     [Theory]

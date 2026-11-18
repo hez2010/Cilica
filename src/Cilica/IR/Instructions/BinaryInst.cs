@@ -18,7 +18,7 @@ public class BinaryInst : Instruction
 
     public override bool MayThrow =>
         // (x / 0) or (x / -1, when x == INT_MIN) may throw
-        (Op is >= BinaryOp.SDiv and <= BinaryOp.URem && Right is not ConstInt { Value: not (0 or -1) }) ||
+        (Op is >= BinaryOp.SDiv and <= BinaryOp.URem && Right is not ConstInt { SignedStackValue: not (0 or -1) }) ||
         ChecksOverflow;
 
     public bool IsCommutative => Op.IsCommutative();
@@ -121,10 +121,5 @@ public static class BinaryOps
             BinaryOp.AddOvf or BinaryOp.MulOvf;
     }
     public static bool IsAssociative(this BinaryOp op)
-    {
-        return op is
-            BinaryOp.Add or BinaryOp.Mul or
-            BinaryOp.And or BinaryOp.Or or BinaryOp.Xor or
-            BinaryOp.AddOvf or BinaryOp.MulOvf;
-    }
+        => op is BinaryOp.Add or BinaryOp.Mul or BinaryOp.And or BinaryOp.Or or BinaryOp.Xor;
 }

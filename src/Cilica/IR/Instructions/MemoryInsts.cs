@@ -140,7 +140,8 @@ public class StoreInst : MemoryInst
         // III.1.6 Implicit argument coercion
 
         return (destType.Kind.IsSmallInt() && (destType.Kind.Size() < srcType.Kind.Size() ||
-                   destType.Kind.Size() == srcType.Kind.Size() && destType.Kind.IsSigned() != srcType.Kind.IsSigned())) ||
+                   destType.Kind.IsUnsigned() && srcType.Kind.IsSigned() ||
+                   destType.Kind.Size() == srcType.Kind.Size() && destType.Kind.IsSigned() && srcType.Kind.IsUnsigned())) ||
                (destType.StackType == StackType.Int && srcType.StackType == StackType.NInt) ||
                (destType.StackType == StackType.ByRef && srcType.StackType == StackType.NInt) ||
                (destType.StackType == StackType.NInt && srcType.StackType == StackType.ByRef) ||

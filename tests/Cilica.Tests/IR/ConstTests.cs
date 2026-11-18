@@ -103,6 +103,23 @@ public class ConstTests
     }
 
     [Fact]
+    public void ConstantStringConcatenationAndReplacementFoldToLiterals()
+    {
+        var type = _resolver.Import(typeof(string));
+        var concat = type.FindMethod("Concat", new MethodSig(PrimType.String, [PrimType.String, PrimType.String], false));
+        var replaceChars = type.FindMethod("Replace", new MethodSig(PrimType.String, [PrimType.Char, PrimType.Char], true));
+        var replaceStrings = type.FindMethod("Replace", new MethodSig(PrimType.String, [PrimType.String, PrimType.String], true));
+        var cat = ConstString.Create("cat");
+        var doubled = Assert.IsType<ConstString>(ConstFolding.FoldCall(concat, [cat, cat]));
+        Assert.Equal("catcat", doubled.Value);
+        var changed = Assert.IsType<ConstString>(ConstFolding.FoldCall(replaceChars, [doubled, ConstInt.CreateI('c'), ConstInt.CreateI('b')]));
+        Assert.Equal("batbat", changed.Value);
+        var replaced = Assert.IsType<ConstString>(ConstFolding.FoldCall(replaceStrings, [doubled, cat, ConstString.Create("dog")]));
+        Assert.Equal("dogdog", replaced.Value);
+        Assert.Null(ConstFolding.FoldCall(replaceStrings, [cat, ConstString.Create(""), cat]));
+    }
+
+    [Fact]
     public void FoldMathUsesTheResolvedOverload()
     {
         var math = _resolver.Import(typeof(Math));

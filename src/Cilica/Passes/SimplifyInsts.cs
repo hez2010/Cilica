@@ -141,6 +141,8 @@ public partial class SimplifyInsts : IMethodPass
             IsAssociative: true
         } &&
             l_nc_c.Op == inst.Op &&
+            l_nc_c.Right.ResultType.StackType == inst.ResultType.StackType &&
+            inst.Right.ResultType.StackType == inst.ResultType.StackType &&
             ConstFolding.FoldBinary(inst.Op, l_nc_c.Right, inst.Right) is Value lr_op_r
         ) {
             inst.Left = l_nc_c.Left;

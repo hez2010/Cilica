@@ -38,6 +38,12 @@ public class MemoryAllocationTests
     static int Increment(ref int value) => value++;
 
     [Fact]
+    public void MultidimensionalArrayTypesHaveRuntimeIdentity()
+    {
+        Assert.True(typeof(int[,]) == typeof(int).MakeArrayType(2));
+    }
+
+    [Fact]
     public void MultidimensionalArrayConstructorsRemainIntact()
     {
         var values = new double[2, 3];

@@ -196,10 +196,11 @@ public static class TypeUtils
     {
         if (type is CompoundType compound) {
             var element = GetRuntimeType(compound.ElemType);
-            if (element == compound.ElemType && compound.ElementModifiers.IsEmpty) return type;
+            if (element == compound.ElemType && compound.ElementModifiers.IsEmpty &&
+                compound is not MDArrayType { LowerBounds.Length: > 0 } and not MDArrayType { Sizes.Length: > 0 }) return type;
             return compound switch {
                 ArrayType => element.CreateArray(),
-                MDArrayType array => new MDArrayType(element, array.Rank, array.LowerBounds, array.Sizes),
+                MDArrayType array => new MDArrayType(element, array.Rank, [], []),
                 ByrefType => element.CreateByref(),
                 PointerType => element.CreatePointer(),
                 _ => throw new UnreachableException()

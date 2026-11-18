@@ -40,9 +40,9 @@ public class ConstInt : Const
         ulong mask = (ulong)GetMask(type.Kind.BitSize());
 
         if (type.Kind.IsSigned()) {
-            return Value >= -(long)(mask / 2 + 1) && Value <= (long)(mask / 2);
+            return SignedStackValue >= -(long)(mask / 2 + 1) && SignedStackValue <= (long)(mask / 2);
         }
-        return (UValue & ~mask) == 0;
+        return (UnsignedStackValue & ~mask) == 0;
     }
 
     private static long GetMask(int size) => size == 64 ? ~0L : (1L << size) - 1;
