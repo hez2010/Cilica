@@ -7,6 +7,20 @@ using Cilica.Util;
 public class ValueTests
 {
     [Fact]
+    public void GeneratedNamesRespectExplicitSuffixes()
+    {
+        var method = Utils.CreateDummyMethodBody();
+        var names = method.GetSymbolTable();
+        string Name(string desired) => names.GetName(method.CreateBlock().SetName(desired));
+        Assert.Equal("item2", Name("item2"));
+        Assert.Equal("item", Name("item"));
+        Assert.Equal("item3", Name("item"));
+        Assert.Equal("item5", Name("item5"));
+        Assert.Equal("item4", Name("item"));
+        Assert.Equal("item6", Name("item"));
+    }
+
+    [Fact]
     public void OperandViewsAcceptCovariantArrays()
     {
         var a = new FakeTrackedValue(1);

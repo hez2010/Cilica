@@ -11,7 +11,7 @@ public class SymbolTable
     readonly MethodBody? _method;
 
     readonly ConditionalWeakTable<TrackedValue, object /* string | int */> _tags = new();
-    readonly HashSet<string> _usedNames = new();
+    readonly Dictionary<string, int> _nextSuffix = new();
     int _nextId = 1;
 
     public SymbolTable(MethodBody? method = null)
@@ -23,12 +23,14 @@ public class SymbolTable
     {
         Ensure.That(this != Empty);
 
-        // Pick an unique name
-        string origName = name;
-        int counter = 2;
-        while (!_usedNames.Add(name)) {
-            name = origName + counter;
-            counter++;
+        // Pick a unique name, resuming at the next suffix for this prefix on a collision.
+        if (!_nextSuffix.TryAdd(name, 2)) {
+            string prefix = name;
+            int suffix = _nextSuffix[prefix];
+            do {
+                name = prefix + suffix++;
+            } while (!_nextSuffix.TryAdd(name, 2));
+            _nextSuffix[prefix] = suffix;
         }
         _tags.AddOrUpdate(value, name);
     }
