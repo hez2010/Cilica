@@ -135,6 +135,41 @@ public class LinqRuntimeTests
         Assert.Equal(4, ticks);
     }
 
+    [Fact]
+    public void CustomCleanupAndEarlyDisposalKeepTheirEffects()
+    {
+        _cleanupCalls = 0;
+        int[] data = [1, 2];
+        int sum = 0;
+        var iterator = data.Where(x => x > 0).GetEnumerator();
+        try {
+            while (iterator.MoveNext()) sum += iterator.Current;
+        } finally {
+            if (iterator != null) Dispose(iterator);
+        }
+        Assert.Equal(3, sum);
+        Assert.Equal(1, _cleanupCalls);
+
+        var stopped = data.Where(x => x > 0).GetEnumerator();
+        if (stopped != null) stopped.Dispose();
+        try {
+            while (stopped!.MoveNext()) sum += stopped.Current;
+        } finally {
+            Tick(ref _cleanupCalls);
+        }
+        Assert.Equal(3, sum);
+        Assert.Equal(2, _cleanupCalls);
+    }
+
+    static int _cleanupCalls;
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    static void Dispose(IEnumerator<int> iterator)
+    {
+        _cleanupCalls++;
+        iterator.Dispose();
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     static void Tick(ref int count) => count++;
 

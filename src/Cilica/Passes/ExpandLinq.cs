@@ -28,7 +28,7 @@ public class ExpandLinq : IMethodPass
         foreach (var call in ctx.Method.Instructions().OfType<CallInst>()) RemoveIdentityCast(call);
 
         foreach (var inst in ctx.Method.Instructions()) {
-            if (inst is CallInst call && CreatePipe(call) is { } pipe) {
+            if (inst is CallInst call && CreatePipe(call, ctx) is { } pipe) {
                 // Expansion can introduce cleanup regions, which CIL filters cannot contain.
                 if (ctx.GetAnalysis<ProtectedRegionAnalysis>().GetBlockRegion(call.Block).IsFilter) continue;
                 queries.Add(pipe);
@@ -55,9 +55,9 @@ public class ExpandLinq : IMethodPass
         call.ReplaceWith(source);
     }
 
-    private LinqSourceNode? CreatePipe(CallInst call)
+    private LinqSourceNode? CreatePipe(CallInst call, MethodTransformContext context)
     {
-        var sink = CreateSink(call);
+        var sink = CreateSink(call, context);
         if (sink == null) {
             return null;
         }
@@ -100,7 +100,7 @@ public class ExpandLinq : IMethodPass
         return true;
     }
 
-    private LinqSink? CreateSink(CallInst call)
+    private LinqSink? CreateSink(CallInst call, MethodTransformContext context)
     {
         var method = call.Method;
         if (method.DeclaringType == t_Enumerable) {
@@ -123,7 +123,7 @@ public class ExpandLinq : IMethodPass
             var declType = (method.DeclaringType as TypeSpec)?.Definition ?? method.DeclaringType;
 
             if (declType == t_IEnumerableOfT0.Definition || declType.Inherits(t_IEnumerableOfT0)) {
-                return LoopSink.TryCreate(call);
+                return LoopSink.TryCreate(call, context);
             }
         }
         return null;
