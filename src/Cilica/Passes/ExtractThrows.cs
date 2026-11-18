@@ -1,130 +1,114 @@
 namespace Cilica.Passes;
 
 using System.Reflection;
+using Cilica.Analysis;
+using Cilica.CodeGen.Cil;
 
 /// <summary> Extract blocks ending with throw to helper methods. </summary>
 public class ExtractThrows : IMethodPass
 {
-    readonly Dictionary<MethodDesc, MethodDef> _thCache = new();
+    // Appending to an ldstr copies the pool. Start another helper page before those copies become expensive.
+    private const int MaxPoolChars = 4096;
+    readonly Dictionary<(TypeDef Owner, MethodDesc Constructor, bool Packed), MethodDef> _helpers = new();
 
     public MethodPassResult Run(MethodTransformContext ctx)
     {
-        if (ctx.Method.NumBlocks < 2 || !HasThrowsAndMayReturn(ctx.Method)) {
-            return MethodInvalidations.None;
-        }
-        bool changed = false;
-
+        bool hasReturn = false;
+        List<ThrowInst>? candidates = null;
         foreach (var block in ctx.Method) {
-            if (block.Last is not ThrowInst { Exception: NewObjInst excAlloc } throwInst) continue;
-
-            // If the block ends with exactly "throw new Exception()", try to replace it with a helper call.
-            if (throwInst.Prev == excAlloc && excAlloc.Args is [] or [ConstString]) {
-                string? msg = excAlloc.Args is [ConstString msgConst] ? msgConst.Value : null;
-                var (helper, msgId) = FindSharedThrowHelper(ctx.Compilation, excAlloc.Constructor, msg);
-
-                var helperCall = new CallInst(helper, msg == null ? [] : [ConstInt.CreateI(msgId)]);
-                helperCall.InsertBefore(throwInst);
-
-                // "throw null" seems to work well for this case because RyuJIT knows about non-returning methods
-                // (as long as they're inline-able) and it can properly eliminate the throw.
-                // An alternative would be to fallthrough some arbitrary block (maybe implicitly with a new UnreachableInst),
-                // but that could mess up the CFG too much and confuse some opts or the JIT.
-                throwInst.Exception = ConstNull.Create();
-                excAlloc.Remove();
-                changed = true;
-                ctx.Logger.Trace($"Extracted throw of '{excAlloc.ResultType}' in '{block}' into helper '{helper}'.");
+            if (block.Last is ReturnInst) hasReturn = true;
+            // Match a newobj immediately followed by a throw of that same value.
+            //   ex = newobj InvalidOperationException::.ctor(string: "bad item") -> InvalidOperationException
+            //   throw ex
+            // ->
+            //   call <>_Cilica_Aux::TH_InvalidOperationException(uint: messageId)
+            //   throw null
+            if (block.Last is ThrowInst { Exception: NewObjInst allocation } site && site.Prev == allocation &&
+                allocation.Args is [] or [ConstString] && !allocation.Constructor.DeclaringType.IsUnboundGeneric) {
+                (candidates ??= new()).Add(site);
             }
+        }
+        if (!hasReturn || candidates == null) return MethodInvalidations.None;
+
+        var owner = ctx.Compilation.GetAuxType();
+        var access = new InliningAccess(owner);
+        bool changed = false;
+        foreach (var site in candidates) {
+            var allocation = (NewObjInst)site.Exception!;
+            if (!access.CanUseMember(allocation.Constructor)) continue;
+            var call = CreateThrowCall(owner, allocation);
+            call.InsertBefore(site);
+            // The helper never returns. The caller still needs a terminator, and RyuJIT
+            // can eliminate the unreachable throw when it recognizes the non-returning call.
+            site.Exception = ConstNull.Create();
+            allocation.Remove();
+            changed = true;
+            ctx.Logger.Trace($"Extracted throw of '{allocation.ResultType}' in '{site.Block}' into helper '{call.Method}'.");
         }
         return changed ? MethodInvalidations.DataFlow : MethodInvalidations.None;
     }
 
-    private static bool HasThrowsAndMayReturn(IR.MethodBody method)
+    private CallInst CreateThrowCall(TypeDef owner, NewObjInst allocation)
     {
-        bool hasReturns = false;
-        bool hasThrows = false;
-
-        foreach (var block in method) {
-            hasReturns |= block.Last is ReturnInst;
-            hasThrows |= block.Last is ThrowInst;
+        var ctor = allocation.Constructor;
+        string? text = allocation.Args is [ConstString { Value.Length: <= byte.MaxValue } message] ? message.Value : null;
+        var key = (owner, ctor, text != null);
+        int id = 0;
+        if (!_helpers.TryGetValue(key, out var helper) || !owner.Methods.Contains(helper) ||
+            text != null && !TryPackMessage(helper, text, out id)) {
+            helper = _helpers[key] = CreateHelper(owner, ctor, text);
+            id = text?.Length ?? 0;
         }
-        return hasThrows && hasReturns;
+        return new CallInst(helper, text != null ? [ConstInt.CreateI(id)] : allocation.Args.ToArray());
     }
 
-    private (MethodDef Helper, int MsgId) FindSharedThrowHelper(Compilation comp, MethodDesc ctor, string? msg)
+    private static bool TryPackMessage(MethodDef helper, string text, out int id)
     {
-        if (!_thCache.TryGetValue(ctor, out var helper)) {
-            // TODO: handle name collisions
-            helper = comp.GetAuxType().CreateMethod(
-                "TH_" + ctor.DeclaringType.Name, PrimType.Void,
-                msg == null ? [] : [new ParamDef(PrimType.UInt32, "msgId")],
-                MethodAttributes.Assembly | MethodAttributes.Static);
-
-            helper.ILBody = new ILMethodBody() {
-                Instructions = GenerateThrowHelperIL(comp, ctor, msg != null),
-                MaxStack = 8,
-            };
-
-            _thCache.Add(ctor, helper);
+        id = 0;
+        // An imported helper can already be inlined with its current pool.
+        if (helper.Body != null) return false;
+        ref var literal = ref helper.ILBody!.Instructions.AsSpan()[0];
+        var pool = (string)literal.Operand!;
+        int offset = pool.IndexOf(text, StringComparison.Ordinal);
+        if (offset < 0) {
+            if (pool.Length + text.Length > MaxPoolChars) return false;
+            offset = pool.Length;
+            literal.Operand = pool + text;
         }
-        int msgId = 0;
-
-        if (msg != null) {
-            ref var ldstr = ref helper.ILBody!.Instructions.AsSpan()[0];
-            string str = (string)ldstr.Operand!;
-            int offset = str.IndexOf(msg);
-
-            // TODO: change this method to return failure instead of throwing when msg len is >= 256
-            Ensure.That(msg.Length < 256 && str.Length < (1 << 24) - 256);
-
-            if (offset < 0) {
-                offset = str.Length;
-                ldstr.Operand = str + msg + "\n\n";
-            }
-            msgId = (offset << 8) | msg.Length;
-        }
-        return (helper, msgId);
+        // A call site passes the pool offset in the upper 24 bits and the length in the low 8.
+        // The helper extracts the substring on the throw path.
+        id = (offset << 8) | text.Length;
+        return true;
     }
 
-    private static ILInstruction[] GenerateThrowHelperIL(Compilation comp, MethodDesc ctor, bool hasConstMsg)
+    private static MethodDef CreateHelper(TypeDef owner, MethodDesc ctor, string? pool)
     {
-        ILInstruction[] code= [
-            new(ILCode.Newobj, ctor),
-            new(ILCode.Throw),
-        ];
+        string prefix = "TH_" + ctor.DeclaringType.Name;
+        string name = prefix;
+        for (int suffix = 1; owner.Methods.Any(method => method.Name == name); suffix++) name = prefix + "_" + suffix;
+        ImmutableArray<ParamDef> parameters = pool != null ? [new ParamDef(PrimType.UInt32, "messageId")] :
+            ctor.ParamSig.Count == 2 ? [new ParamDef(PrimType.String, "message")] : [];
+        var helper = owner.CreateMethod(name, PrimType.Void, parameters, MethodAttributes.Assembly | MethodAttributes.Static);
 
-        if (hasConstMsg) {
-            var m_Substr = comp.Resolver.Import(typeof(string))
-                                        .FindMethod("Substring", new MethodSig(PrimType.String, [PrimType.Int32, PrimType.Int32]));
-
-            // Extract from a substring containing all messages, indexed by a pair of bit-packed (offset: 24, len: 8).
-            // This makes for very small IL but trades off runtime cost.
-            // "abcdef".Substring(msgId >>> 8, msgId & 255)
-            code = [
-                // s0: "concatenated messages"
-                new(ILCode.Ldstr, ""),
-                // s1: msgId >>> 8
-                new(ILCode.Ldarg_0),
-                new(ILCode.Ldc_I4_8),
-                new(ILCode.Shr_Un),
-                // s2: msgId & 255
-                new(ILCode.Ldarg_0),
-                new(ILCode.Ldc_I4, 255),
-                new(ILCode.And),
-                // s0: Substring(s0, s1, s2)
-                new(ILCode.Call, m_Substr),
-                // throw(newobj Exception::.ctor(s0))
-                new(ILCode.Newobj, ctor),
-                new(ILCode.Throw),
-            ];
+        var il = new ILAssembler();
+        if (pool != null) {
+            var substring = owner.Module.Resolver.Import(typeof(string)).FindMethod("Substring",
+                new MethodSig(PrimType.String, [PrimType.Int32, PrimType.Int32], true));
+            // pool.Substring(id >>> 8, id & 255)
+            il.Emit(ILCode.Ldstr, pool);
+            il.Emit(ILCode.Ldarg_0);
+            il.Emit(ILCode.Ldc_I4_8);
+            il.Emit(ILCode.Shr_Un);                    // [pool, offset]
+            il.Emit(ILCode.Ldarg_0);
+            il.Emit(ILCode.Ldc_I4, (int)byte.MaxValue);
+            il.Emit(ILCode.And);                       // [pool, offset, length]
+            il.Emit(ILCode.Call, substring);           // [message]
+        } else if (parameters.Length == 1) {
+            il.Emit(ILCode.Ldarg_0);
         }
-
-        // Compute offsets
-        // TODO: consider moving this out to ILMethodBody
-        int offset = 0;
-        foreach (ref var inst in code.AsSpan()) {
-            inst.Offset = offset;
-            offset += inst.GetSize();
-        }
-        return code;
+        il.Emit(ILCode.Newobj, ctor);
+        il.Emit(ILCode.Throw);
+        helper.ILBody = il.Assemble(null);
+        return helper;
     }
 }
